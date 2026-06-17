@@ -1,7 +1,7 @@
 {
   "company_name": "your-company-code",
   "username": "your-username",
-  "socks_listen": "0.0.0.0:23456",
+  "socks_listen": "0.0.0.0:8989",
   "vpn_server_id": 0,
   "vpn_select_strategy": "default",
   "route_mode": "full",

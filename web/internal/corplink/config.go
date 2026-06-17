@@ -34,9 +34,9 @@ const (
 )
 
 const (
-	defaultDeviceName   = "DollarOS"
-	defaultSocksListen  = "0.0.0.0:23456"
-	cookieFileSuffix    = "cookies.json"
+	defaultDeviceName  = "DollarOS"
+	defaultSocksListen = "0.0.0.0:8989"
+	cookieFileSuffix   = "cookies.json"
 )
 
 // Config is the on-disk configuration. It is shared between the corplink client

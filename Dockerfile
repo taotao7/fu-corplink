@@ -29,6 +29,6 @@ RUN apt-get update \
 COPY --from=build /out/corplink-web /usr/local/bin/corplink-web
 VOLUME /etc/corplink
 WORKDIR /etc/corplink
-EXPOSE 6151/tcp 23456/tcp
+EXPOSE 6151/tcp 8989/tcp
 ENTRYPOINT ["/usr/local/bin/corplink-web"]
 CMD ["--listen", "0.0.0.0:6151", "/etc/corplink/config.json"]
