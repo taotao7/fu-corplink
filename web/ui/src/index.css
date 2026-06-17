@@ -40,12 +40,8 @@ body {
     "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  /* warm beige base with two faint analog colour glows */
+  /* flat warm beige base */
   background-color: #f5f0e8;
-  background-image:
-    radial-gradient(60rem 40rem at 15% -10%, rgba(214, 93, 14, 0.1), transparent 60%),
-    radial-gradient(55rem 38rem at 100% 0%, rgba(69, 133, 136, 0.1), transparent 55%),
-    linear-gradient(180deg, #f8f5ee 0%, #ede8e0 100%);
   background-attachment: fixed;
 }
 

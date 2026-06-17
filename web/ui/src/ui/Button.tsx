@@ -5,7 +5,7 @@ type Size = "sm" | "md";
 
 const styles: Record<Variant, string> = {
   primary:
-    "bg-gradient-to-b from-burnt to-burnt-soft text-cream-50 hover:from-burnt hover:to-burnt active:to-rust shadow-[0_1px_2px_rgba(214,93,14,0.4),0_8px_20px_-8px_rgba(214,93,14,0.6)]",
+    "bg-burnt text-cream-50 hover:bg-burnt-soft active:bg-rust shadow-[0_1px_2px_rgba(214,93,14,0.4),0_8px_20px_-8px_rgba(214,93,14,0.6)]",
   secondary:
     "bg-cream-50 text-ink border border-cream-400 hover:bg-cream-200 hover:border-cream-500 shadow-sm",
   ghost: "text-ink-muted hover:bg-cream-200 hover:text-ink",

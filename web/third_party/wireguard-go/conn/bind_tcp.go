@@ -160,8 +160,19 @@ func (t *TcpBind) deleteConn(endpoint Endpoint, state *tcpConnState) {
 
 func tuneTCPConn(conn *net.TCPConn) {
 	_ = conn.SetNoDelay(true)
-	_ = conn.SetKeepAlive(true)
-	_ = conn.SetKeepAlivePeriod(15 * time.Second)
+	// Aggressive keepalive so a silently-dropped peer connection (e.g. an NAT
+	// idle-timeout on the upstream gateway) is detected within ~25s. The
+	// default Linux probe schedule (idle + 9*75s) takes ~11min to declare the
+	// socket dead — far past WireGuard's RejectAfterTime (180s), after which the
+	// whole session is void and the tunnel goes dark. Idle 10s + 5s*3 probes
+	// reclaims the dead conn well before that, so getConn redials a fresh TCP
+	// connection and the rekey handshake lands on a live socket.
+	_ = conn.SetKeepAliveConfig(net.KeepAliveConfig{
+		Enable:   true,
+		Idle:     10 * time.Second,
+		Interval: 5 * time.Second,
+		Count:    3,
+	})
 	_ = conn.SetReadBuffer(4 << 20)
 	_ = conn.SetWriteBuffer(4 << 20)
 }

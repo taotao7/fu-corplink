@@ -206,11 +206,15 @@ func (m *Manager) sampleOnce() {
 	m.lastSampleTime = now
 }
 
-// runHandshakeWatch tears down the connection if the WireGuard handshake goes
-// stale (no handshake for over 5 minutes), mirroring the upstream client.
+// runHandshakeWatch reconnects the tunnel if the WireGuard handshake goes stale.
+// In TCP-bind mode the peer can drop an idle connection within a few minutes,
+// after which all in-tunnel traffic (including DNS) silently fails while the UI
+// still shows "connected". We poll the last-handshake time and, once it exceeds
+// the timeout, transparently re-establish the tunnel so the connection self-heals
+// instead of stranding the user until they reconnect by hand.
 func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf) {
-	const timeout = 5 * time.Minute
-	ticker := time.NewTicker(time.Minute)
+	const timeout = 90 * time.Second
+	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -228,11 +232,39 @@ func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf
 				continue
 			}
 			if time.Since(time.Unix(last, 0)) > timeout {
-				m.setState(StateLoggedIn, "wireguard handshake timed out")
-				m.teardown()
+				// reconnect runs the teardown that cancels this loop's ctx, so
+				// returning here lets the freshly-spawned watcher take over.
+				go m.reconnect()
 				return
 			}
 		}
+	}
+}
+
+// reconnect tears down the current tunnel and re-establishes it in place,
+// preserving the selected node. It is triggered by the handshake watchdog when
+// the tunnel goes stale. OTP is left empty: accounts with no 2FA reconnect
+// cleanly and accounts with a stored TOTP secret regenerate codes automatically;
+// only manual-OTP accounts fall back to needing a user-initiated reconnect.
+func (m *Manager) reconnect() {
+	m.mu.Lock()
+	if m.state != StateConnected {
+		// a manual disconnect/reconnect raced us; let it win.
+		m.mu.Unlock()
+		return
+	}
+	m.state = StateConnecting
+	m.mu.Unlock()
+
+	log.Printf("wireguard handshake stale; reconnecting tunnel")
+	m.teardown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := m.connectReal(ctx, ""); err != nil {
+		log.Printf("wireguard reconnect failed: %v", err)
+		m.setState(StateLoggedIn, "reconnect failed: "+err.Error())
+		m.teardown()
 	}
 }
 

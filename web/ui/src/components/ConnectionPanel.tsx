@@ -66,7 +66,7 @@ export function ConnectionPanel({
   return (
     <div className="space-y-5">
       {/* live connection banner */}
-      <div className="overflow-hidden rounded-2xl bg-gradient-to-br from-teal/10 to-teal/5 ring-1 ring-teal/25">
+      <div className="overflow-hidden rounded-2xl bg-teal/10 ring-1 ring-teal/25">
         <div className="flex items-center justify-between px-4 pt-4">
           <div className="flex items-center gap-2.5">
             <span className="relative flex h-2.5 w-2.5">

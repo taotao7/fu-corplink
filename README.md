@@ -53,7 +53,7 @@ corplink-web --listen 0.0.0.0:6151 /etc/corplink/config.json
 ```yaml
 services:
   corplink-web:
-    image: riba2534/fu-corplink:dev
+    image: taotao7/fu-corplink:dev
     restart: unless-stopped
     ports:
       - "6151:6151" # Web 控制台

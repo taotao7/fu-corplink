@@ -44,7 +44,7 @@ export function Header({ state }: { state: State | null }) {
   return (
     <header className="mb-8 flex items-center justify-between">
       <div className="flex items-center gap-3">
-        <div className="relative flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-burnt to-rust shadow-[0_4px_14px_-2px_rgba(214,93,14,0.5)]">
+        <div className="relative flex h-11 w-11 items-center justify-center rounded-2xl bg-burnt shadow-[0_4px_14px_-2px_rgba(214,93,14,0.5)]">
           <ShieldCheck className="h-6 w-6 text-cream-50" strokeWidth={2.2} />
           <span className="absolute inset-0 rounded-2xl ring-1 ring-inset ring-white/25" />
         </div>
