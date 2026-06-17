@@ -7,15 +7,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strconv"
 	"sync"
 	"time"
 )
 
+const (
+	dnsCacheTTL      = 5 * time.Minute
+	dnsLookupRetries = 4
+	proxyDialTimeout = 15 * time.Second
+)
+
 // Dialer dials TCP connections to a host:port, typically through the tunnel.
 type Dialer interface {
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+// Resolver resolves hostnames through the tunnel.
+type Resolver interface {
+	LookupHost(ctx context.Context, host string) ([]string, error)
 }
 
 // ProxyAuth optionally gates the proxy with username/password credentials
@@ -32,17 +44,41 @@ func (a *ProxyAuth) required() bool { return a != nil && a.Username != "" }
 // mixed-port). All upstream connections are dialed via the provided Dialer so
 // traffic egresses through the VPN tunnel; DNS is resolved in-tunnel.
 type MixedProxy struct {
-	dialer Dialer
-	auth   *ProxyAuth
+	dialer   Dialer
+	resolver Resolver
+	auth     *ProxyAuth
+
+	dnsMu    sync.Mutex
+	dnsCache map[string]dnsCacheEntry
+	dnsCalls map[string]*dnsLookupCall
 
 	ln     net.Listener
 	closed chan struct{}
 	once   sync.Once
 }
 
+type dnsCacheEntry struct {
+	addrs   []string
+	expires time.Time
+}
+
+type dnsLookupCall struct {
+	done  chan struct{}
+	addrs []string
+	err   error
+}
+
 // NewMixedProxy creates a proxy that dials via dialer. auth may be nil.
 func NewMixedProxy(dialer Dialer, auth *ProxyAuth) *MixedProxy {
-	return &MixedProxy{dialer: dialer, auth: auth, closed: make(chan struct{})}
+	resolver, _ := dialer.(Resolver)
+	return &MixedProxy{
+		dialer:   dialer,
+		resolver: resolver,
+		auth:     auth,
+		dnsCache: make(map[string]dnsCacheEntry),
+		dnsCalls: make(map[string]*dnsLookupCall),
+		closed:   make(chan struct{}),
+	}
 }
 
 // ListenAndServe binds listenAddr and serves until Close is called.
@@ -91,6 +127,7 @@ func (p *MixedProxy) acceptLoop() {
 
 func (p *MixedProxy) handle(client net.Conn) {
 	defer client.Close()
+	setNoDelay(client)
 	_ = client.SetDeadline(time.Now().Add(30 * time.Second))
 
 	br := bufio.NewReader(client)
@@ -159,18 +196,129 @@ func (p *MixedProxy) handleSocks5(client net.Conn, br *bufio.Reader) {
 		return
 	}
 	port := binary.BigEndian.Uint16(portBuf[:])
-	target := net.JoinHostPort(host, strconv.Itoa(int(port)))
 
-	upstream, err := p.dialer.DialContext(context.Background(), "tcp", target)
+	upstream, err := p.dialContext(context.Background(), "tcp", host, strconv.Itoa(int(port)))
 	if err != nil {
+		log.Printf("socks5 dial %s:%d failed: %v", host, port, err)
 		socks5Reply(client, 0x05) // connection refused
 		return
 	}
+	setNoDelay(upstream)
 	defer upstream.Close()
 	socks5Reply(client, 0x00) // succeeded
 
 	_ = client.SetDeadline(time.Time{})
 	relay(client, upstream, br)
+}
+
+func (p *MixedProxy) dialContext(ctx context.Context, network, host, port string) (net.Conn, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, proxyDialTimeout)
+		defer cancel()
+	}
+
+	if net.ParseIP(host) != nil || p.resolver == nil {
+		return p.dialer.DialContext(ctx, network, net.JoinHostPort(host, port))
+	}
+
+	addrs, err := p.lookupHost(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, addr := range addrs {
+		upstream, err := p.dialer.DialContext(ctx, network, net.JoinHostPort(addr, port))
+		if err == nil {
+			return upstream, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, &net.DNSError{Err: "no addresses found", Name: host}
+}
+
+func (p *MixedProxy) lookupHost(ctx context.Context, host string) ([]string, error) {
+	now := time.Now()
+	p.dnsMu.Lock()
+	if entry, ok := p.dnsCache[host]; ok && now.Before(entry.expires) {
+		addrs := append([]string(nil), entry.addrs...)
+		p.dnsMu.Unlock()
+		return addrs, nil
+	}
+	if call, ok := p.dnsCalls[host]; ok {
+		p.dnsMu.Unlock()
+		select {
+		case <-call.done:
+			if call.err != nil {
+				return nil, call.err
+			}
+			return append([]string(nil), call.addrs...), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	call := &dnsLookupCall{done: make(chan struct{})}
+	p.dnsCalls[host] = call
+	p.dnsMu.Unlock()
+
+	addrs, err := p.resolveHost(ctx, host)
+
+	p.dnsMu.Lock()
+	if err == nil {
+		p.dnsCache[host] = dnsCacheEntry{
+			addrs:   append([]string(nil), addrs...),
+			expires: now.Add(dnsCacheTTL),
+		}
+	}
+	call.addrs = append([]string(nil), addrs...)
+	call.err = err
+	delete(p.dnsCalls, host)
+	close(call.done)
+	p.dnsMu.Unlock()
+
+	return addrs, err
+}
+
+func (p *MixedProxy) resolveHost(ctx context.Context, host string) ([]string, error) {
+	var lastErr error
+	for attempt := 0; attempt < dnsLookupRetries; attempt++ {
+		addrs, err := p.resolver.LookupHost(ctx, host)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		ips := make([]string, 0, len(addrs))
+		for _, addr := range addrs {
+			if ip := net.ParseIP(addr); ip != nil && !isBenchmarkFakeIP(ip) {
+				ips = append(ips, ip.String())
+			}
+		}
+		if len(ips) > 0 {
+			return ips, nil
+		}
+		lastErr = &net.DNSError{Err: "no addresses found", Name: host}
+	}
+	return nil, lastErr
+}
+
+func isBenchmarkFakeIP(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	return ip4[0] == 198 && (ip4[1] == 18 || ip4[1] == 19)
+}
+
+func setNoDelay(conn net.Conn) {
+	type noDelayer interface {
+		SetNoDelay(bool) error
+	}
+	if c, ok := conn.(noDelayer); ok {
+		_ = c.SetNoDelay(true)
+	}
 }
 
 func (p *MixedProxy) socks5Auth(client net.Conn, br *bufio.Reader) bool {

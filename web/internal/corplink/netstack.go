@@ -22,6 +22,7 @@ type NetstackDevice struct {
 	tun    *netstack.Net
 	dev    *device.Device
 	dns    []netip.Addr
+	has6   bool
 	closed atomic.Bool
 
 	rxBytes atomic.Int64
@@ -50,7 +51,16 @@ func StartNetstack(conf *WgConf) (*NetstackDevice, error) {
 		return nil, fmt.Errorf("create netstack tun: %w", err)
 	}
 
-	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelError, "wg-corplink "))
+	bind, err := newWireGuardBind(conf.Protocol)
+	if err != nil {
+		_ = tunDev.Close()
+		return nil, err
+	}
+	dev := device.NewDevice(tunDev, bind, device.NewLogger(device.LogLevelError, "wg-corplink "))
+	if err := dev.Up(); err != nil {
+		dev.Close()
+		return nil, fmt.Errorf("bring up wireguard: %w", err)
+	}
 
 	uapi, err := buildUAPI(conf)
 	if err != nil {
@@ -61,12 +71,19 @@ func StartNetstack(conf *WgConf) (*NetstackDevice, error) {
 		dev.Close()
 		return nil, fmt.Errorf("configure wireguard: %w", err)
 	}
-	if err := dev.Up(); err != nil {
-		dev.Close()
-		return nil, fmt.Errorf("bring up wireguard: %w", err)
-	}
 
-	return &NetstackDevice{tun: tnet, dev: dev, dns: dnsAddrs}, nil
+	return &NetstackDevice{tun: tnet, dev: dev, dns: dnsAddrs, has6: hasIPv6(localAddrs)}, nil
+}
+
+func newWireGuardBind(protocol int) (conn.Bind, error) {
+	switch protocol {
+	case 0:
+		return conn.NewDefaultBind(), nil
+	case 1:
+		return conn.NewTCPBind(), nil
+	default:
+		return nil, fmt.Errorf("unsupported wireguard protocol %d", protocol)
+	}
 }
 
 // buildUAPI renders the wg-go IPC configuration string from a WgConf, following
@@ -156,6 +173,15 @@ func parseDNS(dns string) []netip.Addr {
 	return out
 }
 
+func hasIPv6(addrs []netip.Addr) bool {
+	for _, addr := range addrs {
+		if addr.Is6() {
+			return true
+		}
+	}
+	return false
+}
+
 // DialContext dials a TCP connection through the tunnel.
 func (n *NetstackDevice) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	conn, err := n.tun.DialContext(ctx, network, addr)
@@ -167,7 +193,18 @@ func (n *NetstackDevice) DialContext(ctx context.Context, network, addr string) 
 
 // LookupHost resolves a hostname using the tunnel's DNS configuration.
 func (n *NetstackDevice) LookupHost(ctx context.Context, host string) ([]string, error) {
-	return n.tun.LookupContextHost(ctx, host)
+	addrs, err := n.tun.LookupContextHost(ctx, host)
+	if err != nil || n.has6 {
+		return addrs, err
+	}
+	out := addrs[:0]
+	for _, addr := range addrs {
+		ip, err := netip.ParseAddr(addr)
+		if err != nil || !ip.Is6() {
+			out = append(out, addr)
+		}
+	}
+	return out, nil
 }
 
 // Transfer returns the cumulative rx/tx byte counts observed on proxied conns.

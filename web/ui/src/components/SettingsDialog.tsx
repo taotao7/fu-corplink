@@ -26,6 +26,7 @@ export function SettingsDialog({
         socks_listen: cfg.socks_listen,
         vpn_select_strategy: cfg.vpn_select_strategy,
         route_mode: cfg.route_mode,
+        force_protocol: cfg.force_protocol,
       });
       onClose();
     } finally {
@@ -58,6 +59,16 @@ export function SettingsDialog({
             options={[
               { value: "full", label: "全局 (full)" },
               { value: "split", label: "分流 (split)" },
+            ]}
+          />
+          <Select
+            label="WireGuard 协议"
+            value={cfg.force_protocol}
+            onChange={(v) => setCfg({ ...cfg, force_protocol: v })}
+            options={[
+              { value: "", label: "自动 (protocol_mode)" },
+              { value: "udp", label: "强制 UDP" },
+              { value: "tcp", label: "强制 TCP" },
             ]}
           />
           <p className="text-xs text-slate-400">代理地址改动会在下次连接时生效。</p>

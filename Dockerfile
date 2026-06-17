@@ -15,6 +15,7 @@ RUN cd ui && npm run build
 FROM golang:1.23-bookworm AS build
 WORKDIR /src
 COPY web/go.mod web/go.sum* ./
+COPY web/third_party ./third_party
 RUN go mod download
 COPY web/ ./
 # overwrite the committed dist with the freshly built frontend

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -49,12 +50,14 @@ func (p *MixedProxy) checkHTTPAuth(req *http.Request) bool {
 
 // handleConnect establishes a tunnel for an HTTP CONNECT request (HTTPS).
 func (p *MixedProxy) handleConnect(client net.Conn, req *http.Request) {
-	target := req.Host
-	if !strings.Contains(target, ":") {
-		target += ":443"
+	host, port := splitHostPortDefault(req.Host, "443")
+	if host == "" {
+		_, _ = client.Write([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"))
+		return
 	}
-	upstream, err := p.dialer.DialContext(context.Background(), "tcp", target)
+	upstream, err := p.dialContext(context.Background(), "tcp", host, port)
 	if err != nil {
+		log.Printf("http connect dial %s:%s failed: %v", host, port, err)
 		_, _ = client.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"))
 		return
 	}
@@ -80,10 +83,10 @@ func (p *MixedProxy) handleForward(client net.Conn, br *bufio.Reader, req *http.
 	if port == "" {
 		port = "80"
 	}
-	target := net.JoinHostPort(hostnameOnly(host), port)
 
-	upstream, err := p.dialer.DialContext(context.Background(), "tcp", target)
+	upstream, err := p.dialContext(context.Background(), "tcp", hostnameOnly(host), port)
 	if err != nil {
+		log.Printf("http forward dial %s:%s failed: %v", hostnameOnly(host), port, err)
 		_, _ = client.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"))
 		return
 	}
@@ -113,4 +116,17 @@ func hostnameOnly(hostport string) string {
 		return h
 	}
 	return hostport
+}
+
+func splitHostPortDefault(hostport, defaultPort string) (string, string) {
+	if h, p, err := net.SplitHostPort(hostport); err == nil {
+		return h, p
+	}
+	if hostport == "" {
+		return "", ""
+	}
+	if ip := net.ParseIP(hostport); ip != nil {
+		return ip.String(), defaultPort
+	}
+	return hostport, defaultPort
 }

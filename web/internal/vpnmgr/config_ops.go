@@ -3,6 +3,7 @@ package vpnmgr
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"corplink-web/internal/corplink"
 )
@@ -47,6 +48,7 @@ type ConfigView struct {
 	VPNServerID       int    `json:"vpn_server_id"`
 	VPNSelectStrategy string `json:"vpn_select_strategy"`
 	RouteMode         string `json:"route_mode"`
+	ForceProtocol     string `json:"force_protocol"`
 	CompanyName       string `json:"company_name"`
 	Username          string `json:"username"`
 }
@@ -60,6 +62,7 @@ func (m *Manager) ConfigView() ConfigView {
 		VPNServerID:       m.conf.VPNServerID,
 		VPNSelectStrategy: m.conf.VPNSelectStrategy,
 		RouteMode:         m.conf.RouteModeOrDefault(),
+		ForceProtocol:     m.conf.ForceProtocol,
 		CompanyName:       m.conf.CompanyName,
 		Username:          m.conf.Username,
 	}
@@ -71,6 +74,7 @@ type ConfigUpdate struct {
 	VPNServerID       *int    `json:"vpn_server_id"`
 	VPNSelectStrategy *string `json:"vpn_select_strategy"`
 	RouteMode         *string `json:"route_mode"`
+	ForceProtocol     *string `json:"force_protocol"`
 }
 
 // UpdateConfig applies a partial config update and persists it. Changes to the
@@ -93,6 +97,13 @@ func (m *Manager) UpdateConfig(u ConfigUpdate) error {
 		switch *u.RouteMode {
 		case corplink.RouteModeFull, corplink.RouteModeSplit:
 			m.conf.RouteMode = *u.RouteMode
+		}
+	}
+	if u.ForceProtocol != nil {
+		forceProtocol := strings.ToLower(strings.TrimSpace(*u.ForceProtocol))
+		switch forceProtocol {
+		case "", "udp", "tcp":
+			m.conf.ForceProtocol = forceProtocol
 		}
 	}
 	m.mu.Unlock()

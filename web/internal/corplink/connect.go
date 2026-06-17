@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"strconv"
+	"strings"
 )
 
 // BuildWgConf assembles a WgConf from a chosen node and its peer-info response,
@@ -43,6 +44,10 @@ func (c *Client) BuildWgConf(node VPNInfo, info *respWgInfo) (*WgConf, error) {
 			carved = append(carved, subtractCIDR(a, peerCIDR)...)
 		}
 		allowed = carved
+	}
+	allowed = ensureDNSAllowedIPs(allowed, info.Setting.VPNDNS)
+	if address6 == "" {
+		allowed = filterIPv6Routes(allowed)
 	}
 	// validate / normalize remaining entries
 	allowed = normalizeCIDRs(allowed)
@@ -140,6 +145,42 @@ func normalizeCIDRs(in []string) []string {
 		}
 		seen[s] = struct{}{}
 		out = append(out, s)
+	}
+	return out
+}
+
+func ensureDNSAllowedIPs(allowed []string, dns string) []string {
+	for _, s := range strings.FieldsFunc(dns, func(r rune) bool { return r == ',' || r == ' ' }) {
+		addr, err := netip.ParseAddr(strings.TrimSpace(s))
+		if err != nil {
+			continue
+		}
+		bits := 32
+		if addr.Is6() {
+			bits = 128
+		}
+		cidr := netip.PrefixFrom(addr, bits).String()
+		covered := false
+		for _, route := range allowed {
+			if len(subtractCIDR(cidr, route)) == 0 {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			allowed = append(allowed, cidr)
+		}
+	}
+	return allowed
+}
+
+func filterIPv6Routes(in []string) []string {
+	out := in[:0]
+	for _, route := range in {
+		prefix, err := netip.ParsePrefix(route)
+		if err != nil || !prefix.Addr().Is6() {
+			out = append(out, route)
+		}
 	}
 	return out
 }

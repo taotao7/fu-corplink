@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -73,6 +74,15 @@ func (m *Manager) connectReal(ctx context.Context, otp string) error {
 	if err != nil {
 		return err
 	}
+	log.Printf(
+		"wireguard config: protocol=%d endpoint=%s address=%s ipv6=%t allowed_ips=%d dns=%q",
+		wgConf.Protocol,
+		wgConf.PeerAddress,
+		wgConf.Address,
+		wgConf.Address6 != "",
+		len(wgConf.AllowedIPs),
+		wgConf.DNS,
+	)
 
 	device, err := corplink.StartNetstack(wgConf)
 	if err != nil {

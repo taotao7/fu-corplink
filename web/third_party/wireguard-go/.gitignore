@@ -1,0 +1,8 @@
+wireguard-go
+
+# version files
+version.go
+libwg/version.go
+
+# c-shared build output files
+libwg.*

@@ -67,6 +67,7 @@ export interface ConfigView {
   vpn_server_id: number;
   vpn_select_strategy: string;
   route_mode: string;
+  force_protocol: string;
   company_name: string;
   username: string;
 }
