@@ -1,15 +1,15 @@
 # syntax=docker/dockerfile:1
 
 # ---- frontend build ----
+# Keep the same layout as the repo (web/ui beside web/internal) so vite's
+# outDir "../internal/server/dist" resolves exactly like it does locally.
 FROM node:20-bookworm AS ui
-WORKDIR /ui
-COPY web/ui/package*.json ./
-RUN npm ci
-COPY web/ui/ ./
-RUN npm run build
-# output goes to /web/internal/server/dist via vite build.outDir; copy it out
-# to a stable location for the Go build stage.
-RUN mkdir -p /dist && cp -r ../internal/server/dist/* /dist/ 2>/dev/null || true
+WORKDIR /src/web
+COPY web/ui/package*.json ./ui/
+RUN cd ui && npm ci
+COPY web/ ./
+RUN cd ui && npm run build
+# dist now lives at /src/web/internal/server/dist
 
 # ---- go build ----
 FROM golang:1.23-bookworm AS build
@@ -17,8 +17,8 @@ WORKDIR /src
 COPY web/go.mod web/go.sum* ./
 RUN go mod download
 COPY web/ ./
-# bring in the freshly built frontend so go:embed picks it up
-COPY --from=ui /dist/ ./internal/server/dist/
+# overwrite the committed dist with the freshly built frontend
+COPY --from=ui /src/web/internal/server/dist/ ./internal/server/dist/
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/corplink-web ./cmd/corplink-web
 
 # ---- runtime ----
