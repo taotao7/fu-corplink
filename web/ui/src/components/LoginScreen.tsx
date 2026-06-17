@@ -34,13 +34,13 @@ export function LoginScreen({
     <Card>
       <button
         onClick={onBack}
-        className="mb-4 inline-flex items-center gap-1 text-sm text-slate-500 hover:text-slate-700"
+        className="mb-4 inline-flex items-center gap-1 text-sm text-ink-muted hover:text-ink"
       >
         <ArrowLeft className="h-4 w-4" /> 重新输入企业代号
       </button>
-      <h2 className="mb-4 text-base font-semibold text-slate-900">登录</h2>
+      <h2 className="mb-4 text-base font-semibold text-ink">登录</h2>
 
-      <div className="mb-5 flex gap-1 rounded-xl bg-slate-100 p-1">
+      <div className="mb-5 flex gap-1 rounded-xl bg-cream-200 p-1">
         <TabButton active={tab === "password"} onClick={() => setTab("password")}>
           <KeyRound className="h-4 w-4" /> 密码
         </TabButton>
@@ -76,7 +76,7 @@ function TabButton({
     <button
       onClick={onClick}
       className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition ${
-        active ? "bg-white text-blue-600 shadow-sm" : "text-slate-500 hover:text-slate-700"
+        active ? "bg-cream-50 text-burnt shadow-sm" : "text-ink-muted hover:text-ink"
       }`}
     >
       {children}
@@ -121,18 +121,18 @@ function PasswordForm({
         onKeyDown={(e) => e.key === "Enter" && submit()}
       />
       <label className="block">
-        <span className="mb-1.5 block text-sm font-medium text-slate-600">登录方式</span>
+        <span className="mb-1.5 block text-sm font-medium text-ink-muted">登录方式</span>
         <select
           value={platform}
           onChange={(e) => setPlatform(e.target.value)}
-          className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+          className="w-full rounded-xl border border-cream-400 bg-cream-50 px-3.5 py-2.5 text-sm outline-none focus:border-burnt focus:ring-2 focus:ring-burnt/15"
         >
           <option value="feilian">飞连密码</option>
           <option value="feilian_v1">飞连密码 (v1)</option>
           {ldap && <option value="ldap">LDAP</option>}
         </select>
       </label>
-      {err && <p className="text-sm text-rose-600">{err}</p>}
+      {err && <p className="text-sm text-rust">{err}</p>}
       <Button onClick={submit} loading={loading} className="w-full">
         登录
       </Button>
@@ -189,7 +189,7 @@ function EmailForm({ onLoggedIn }: { onLoggedIn: () => void }) {
           onKeyDown={(e) => e.key === "Enter" && verify()}
         />
       )}
-      {err && <p className="text-sm text-rose-600">{err}</p>}
+      {err && <p className="text-sm text-rust">{err}</p>}
       {!sent ? (
         <Button onClick={sendCode} loading={loading} className="w-full">
           发送验证码
@@ -236,7 +236,7 @@ function SsoForm({
 
   return (
     <div className="space-y-3">
-      <p className="text-sm text-slate-500">
+      <p className="text-sm text-ink-muted">
         点击下方按钮在新标签页完成第三方登录，完成后会自动继续。
       </p>
       {options.map((o) => (
@@ -252,7 +252,7 @@ function SsoForm({
         </Button>
       ))}
       {options.length === 0 && (
-        <p className="text-sm text-slate-400">当前没有可用的 SSO 登录方式</p>
+        <p className="text-sm text-ink-faint">当前没有可用的 SSO 登录方式</p>
       )}
     </div>
   );

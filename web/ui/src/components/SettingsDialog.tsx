@@ -71,7 +71,7 @@ export function SettingsDialog({
               { value: "tcp", label: "强制 TCP" },
             ]}
           />
-          <p className="text-xs text-slate-400">代理地址改动会在下次连接时生效。</p>
+          <p className="text-xs text-ink-faint">代理地址改动会在下次连接时生效。</p>
           <div className="flex justify-end gap-2">
             <Button variant="secondary" onClick={onClose}>
               取消
@@ -99,11 +99,11 @@ function Select({
 }) {
   return (
     <label className="block">
-      <span className="mb-1.5 block text-sm font-medium text-slate-600">{label}</span>
+      <span className="mb-1.5 block text-sm font-medium text-ink-muted">{label}</span>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+        className="w-full rounded-xl border border-cream-400 bg-cream-50 px-3.5 py-2.5 text-sm outline-none focus:border-burnt focus:ring-2 focus:ring-burnt/15"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>

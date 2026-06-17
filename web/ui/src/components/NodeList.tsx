@@ -45,18 +45,18 @@ export function NodeList({
     <div>
       <div className="mb-3 flex items-center gap-2">
         <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-faint" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="搜索节点"
-            className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+            className="w-full rounded-xl border border-cream-400 bg-cream-50 py-2.5 pl-9 pr-3 text-sm shadow-sm outline-none focus:border-burnt focus:ring-2 focus:ring-burnt/15"
           />
         </div>
         <button
           onClick={onRefresh}
           disabled={loading}
-          className="rounded-xl border border-slate-200 bg-white p-2.5 text-slate-500 transition hover:bg-slate-50 disabled:opacity-50"
+          className="flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-xl border border-cream-400 bg-cream-50 text-ink-muted shadow-sm transition hover:border-cream-500 hover:bg-cream-200 disabled:opacity-50"
           title="重新探测延迟"
         >
           <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
@@ -65,7 +65,7 @@ export function NodeList({
 
       <div className="scroll-thin max-h-[22rem] space-y-2 overflow-y-auto pr-1">
         {filtered.length === 0 && (
-          <p className="py-8 text-center text-sm text-slate-400">
+          <p className="py-8 text-center text-sm text-ink-faint">
             {loading ? "正在加载节点…" : "没有匹配的节点"}
           </p>
         )}
@@ -82,23 +82,23 @@ export function NodeList({
               }
               className={`flex cursor-pointer items-center justify-between rounded-xl border px-4 py-3 transition ${
                 pinned
-                  ? "border-blue-300 bg-blue-50 ring-1 ring-blue-200"
-                  : "border-slate-200 bg-white hover:border-blue-200 hover:bg-slate-50"
+                  ? "border-burnt/40 bg-burnt/5 ring-1 ring-burnt/20"
+                  : "border-cream-300 bg-cream-50 hover:border-burnt/30 hover:bg-cream-200"
               }`}
             >
               <div className="flex min-w-0 items-center gap-2.5">
                 <span
                   className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
-                    pinned ? "border-blue-500 bg-blue-500" : "border-slate-300"
+                    pinned ? "border-burnt bg-burnt" : "border-cream-500"
                   }`}
                 >
-                  {pinned && <Check className="h-3 w-3 text-white" />}
+                  {pinned && <Check className="h-3 w-3 text-cream-50" />}
                 </span>
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-slate-800">
+                  <p className="truncate text-sm font-medium text-ink">
                     {s.name || s.en_name}
                   </p>
-                  <p className="truncate text-xs text-slate-400">{s.ip}</p>
+                  <p className="truncate text-xs text-ink-faint">{s.ip}</p>
                 </div>
               </div>
               <div className="flex items-center gap-3">
@@ -109,7 +109,7 @@ export function NodeList({
                       e.stopPropagation();
                       onPin(0);
                     }}
-                    className="rounded-lg p-1.5 text-blue-600 transition hover:bg-blue-100"
+                    className="rounded-lg p-1.5 text-burnt transition hover:bg-burnt/10"
                     title="取消选择"
                   >
                     <Pin className="h-4 w-4" />

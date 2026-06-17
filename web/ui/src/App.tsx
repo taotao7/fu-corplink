@@ -121,30 +121,34 @@ export default function App() {
   return (
     <Shell state={state}>
       {needCompany ? (
-        <CompanyScreen
-          onDone={() => {
-            setForceCompany(false);
-            refreshState();
-          }}
-        />
+        <div className="animate-rise">
+          <CompanyScreen
+            onDone={() => {
+              setForceCompany(false);
+              refreshState();
+            }}
+          />
+        </div>
       ) : !loggedIn ? (
-        <LoginScreen
-          onLoggedIn={refreshState}
-          onBack={() => setForceCompany(true)}
-        />
+        <div className="animate-rise">
+          <LoginScreen
+            onLoggedIn={refreshState}
+            onBack={() => setForceCompany(true)}
+          />
+        </div>
       ) : (
-        <div className="space-y-4">
+        <div className="animate-rise space-y-4">
           <Card>
-            <div className="mb-4 flex items-center justify-between">
+            <div className="mb-5 flex items-center justify-between">
               <div>
-                <h2 className="text-base font-semibold text-slate-900">连接</h2>
-                <p className="text-sm text-slate-500">{state!.username}</p>
+                <h2 className="text-lg font-bold tracking-tight text-ink">连接</h2>
+                <p className="text-sm text-ink-muted">{state!.username}</p>
               </div>
-              <div className="flex gap-2">
-                <Button variant="ghost" onClick={() => setSettingsOpen(true)}>
+              <div className="flex gap-1">
+                <Button variant="ghost" size="sm" onClick={() => setSettingsOpen(true)}>
                   <Settings className="h-4 w-4" /> 设置
                 </Button>
-                <Button variant="ghost" onClick={logout}>
+                <Button variant="ghost" size="sm" onClick={logout}>
                   <LogOut className="h-4 w-4" /> 退出
                 </Button>
               </div>
@@ -155,7 +159,7 @@ export default function App() {
           {state!.state !== "connected" && (
             <Card>
               <div className="mb-3 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-slate-700">选择节点</h3>
+                <h3 className="text-base font-bold tracking-tight text-ink">选择节点</h3>
               </div>
               <NodeList
                 servers={servers}
@@ -178,7 +182,7 @@ export default function App() {
                       }`
                     : "自动选择并连接"}
                 </Button>
-                <p className="mt-2 text-center text-xs text-slate-400">
+                <p className="mt-2 text-center text-xs text-ink-faint">
                   {state!.server_id
                     ? "已选定节点，点击上方按钮连接"
                     : "点击列表中的节点可指定，不选则自动挑选"}
@@ -188,7 +192,7 @@ export default function App() {
           )}
 
           {notice && (
-            <p className="rounded-xl bg-rose-50 px-4 py-2 text-sm text-rose-600">
+            <p className="animate-rise rounded-xl border border-rust/30 bg-rust/5 px-4 py-2.5 text-sm text-rust backdrop-blur">
               {notice}
             </p>
           )}
@@ -221,7 +225,7 @@ function Shell({
     <div className="mx-auto flex min-h-full max-w-lg flex-col px-4 py-10">
       <Header state={state ?? null} />
       {children}
-      <footer className="mt-auto pt-10 text-center text-xs text-slate-400">
+      <footer className="mt-auto pt-10 text-center text-xs text-ink-faint">
         fu-corplink · 非官方第三方实现
       </footer>
     </div>
@@ -243,10 +247,10 @@ function OtpDialog({
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm" onClick={onCancel} />
+      <div className="absolute inset-0 bg-ink/30 backdrop-blur-sm" onClick={onCancel} />
       <Card className="relative z-10 w-full max-w-sm">
-        <h2 className="mb-2 text-base font-semibold text-slate-900">输入 2FA 验证码</h2>
-        <p className="mb-4 text-sm text-slate-500">该节点需要 6 位动态验证码</p>
+        <h2 className="mb-2 text-base font-semibold text-ink">输入 2FA 验证码</h2>
+        <p className="mb-4 text-sm text-ink-muted">该节点需要 6 位动态验证码</p>
         <input
           autoFocus
           inputMode="numeric"
@@ -254,7 +258,7 @@ function OtpDialog({
           value={value}
           onChange={(e) => onChange(e.target.value.replace(/\D/g, ""))}
           onKeyDown={(e) => e.key === "Enter" && onSubmit()}
-          className="mb-4 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-center text-lg tracking-[0.4em] outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+          className="mb-4 w-full rounded-xl border border-cream-400 bg-cream-50 px-3.5 py-2.5 text-center text-lg tracking-[0.4em] outline-none focus:border-burnt focus:ring-2 focus:ring-burnt/15"
           placeholder="000000"
         />
         <div className="flex justify-end gap-2">

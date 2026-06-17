@@ -50,9 +50,13 @@ export function ConnectionPanel({
 
   if (!connected) {
     return (
-      <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-center text-sm text-slate-500">
-        <Plug className="mx-auto mb-2 h-5 w-5 text-slate-400" />
-        选择一个节点并连接，连接成功后即可使用代理。
+      <div className="flex flex-col items-center gap-2 rounded-2xl border border-dashed border-cream-400 bg-cream-200/40 px-4 py-7 text-center">
+        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-cream-300 text-ink-faint">
+          <Plug className="h-5 w-5" />
+        </div>
+        <p className="text-sm text-ink-muted">
+          选择一个节点并连接，连接成功后即可使用代理。
+        </p>
       </div>
     );
   }
@@ -60,25 +64,33 @@ export function ConnectionPanel({
   const proxyAddr = traffic?.proxy_listen || state.proxy_listen;
 
   return (
-    <div className="space-y-4">
-      <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4">
-        <div className="mb-3 flex items-center justify-between">
-          <span className="text-sm font-medium text-emerald-700">
-            已连接 · {state.server_name}
-          </span>
+    <div className="space-y-5">
+      {/* live connection banner */}
+      <div className="overflow-hidden rounded-2xl bg-gradient-to-br from-teal/10 to-teal/5 ring-1 ring-teal/25">
+        <div className="flex items-center justify-between px-4 pt-4">
+          <div className="flex items-center gap-2.5">
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="pulse-dot absolute inline-flex h-2.5 w-2.5 rounded-full bg-teal" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-teal" />
+            </span>
+            <div className="leading-tight">
+              <p className="text-sm font-semibold text-teal-deep">已连接</p>
+              <p className="text-xs text-teal/90">{state.server_name}</p>
+            </div>
+          </div>
           <Button variant="danger" loading={busy} onClick={disconnect}>
             <Power className="h-4 w-4" /> 断开
           </Button>
         </div>
-        <div className="grid grid-cols-2 gap-3">
-          <RateCard
-            icon={<ArrowDown className="h-4 w-4 text-emerald-600" />}
+        <div className="mt-3 grid grid-cols-2 divide-x divide-teal/15 border-t border-teal/15">
+          <Rate
+            icon={<ArrowDown className="h-4 w-4 text-teal" />}
             label="下载"
             rate={traffic ? formatRate(traffic.rx_bps) : "—"}
             total={traffic ? formatBytes(traffic.rx_total) : "—"}
           />
-          <RateCard
-            icon={<ArrowUp className="h-4 w-4 text-blue-600" />}
+          <Rate
+            icon={<ArrowUp className="h-4 w-4 text-burnt" />}
             label="上传"
             rate={traffic ? formatRate(traffic.tx_bps) : "—"}
             total={traffic ? formatBytes(traffic.tx_total) : "—"}
@@ -86,33 +98,36 @@ export function ConnectionPanel({
         </div>
       </div>
 
-      <div className="rounded-xl border border-slate-200 bg-white p-4">
-        <p className="mb-1.5 text-sm font-medium text-slate-600">代理地址</p>
+      {/* proxy address */}
+      <div>
+        <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">
+          代理地址
+        </p>
         <div className="flex items-center gap-2">
-          <code className="flex-1 rounded-lg bg-slate-100 px-3 py-2 text-sm text-slate-800">
+          <code className="flex-1 rounded-xl border border-cream-400 bg-cream-200 px-3.5 py-2.5 font-mono text-sm tracking-tight text-ink">
             {proxyAddr}
           </code>
           <button
             onClick={copyProxy}
-            className="rounded-lg border border-slate-200 p-2 text-slate-500 transition hover:bg-slate-50"
+            className={`flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-xl border transition ${
+              copied
+                ? "border-teal/30 bg-teal/10 text-teal-deep"
+                : "border-cream-400 bg-cream-50 text-ink-muted hover:border-cream-500 hover:bg-cream-200"
+            }`}
             title="复制"
           >
-            {copied ? (
-              <Check className="h-4 w-4 text-emerald-600" />
-            ) : (
-              <Copy className="h-4 w-4" />
-            )}
+            {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
           </button>
         </div>
-        <p className="mt-2 text-xs text-slate-400">
-          HTTP / SOCKS5 混合端口，用 <code>socks5h://</code> 让 DNS 也走隧道。
+        <p className="mt-2 text-xs text-ink-faint">
+          HTTP / SOCKS5 混合端口，用 <code className="rounded bg-cream-300 px-1 py-0.5 font-mono text-[11px] text-ink-muted">socks5h://</code> 让 DNS 也走隧道。
         </p>
       </div>
     </div>
   );
 }
 
-function RateCard({
+function Rate({
   icon,
   label,
   rate,
@@ -124,12 +139,14 @@ function RateCard({
   total: string;
 }) {
   return (
-    <div className="rounded-lg bg-white/70 px-3 py-2">
-      <div className="flex items-center gap-1.5 text-xs text-slate-500">
+    <div className="px-4 py-3.5">
+      <div className="flex items-center gap-1.5 text-xs font-medium text-ink-muted">
         {icon} {label}
       </div>
-      <p className="mt-0.5 text-lg font-semibold tabular-nums text-slate-800">{rate}</p>
-      <p className="text-xs text-slate-400">累计 {total}</p>
+      <p className="mt-1 text-2xl font-bold tabular-nums tracking-tight text-ink">
+        {rate}
+      </p>
+      <p className="mt-0.5 text-xs text-ink-faint">累计 {total}</p>
     </div>
   );
 }

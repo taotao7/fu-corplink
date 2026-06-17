@@ -9,7 +9,7 @@ export function Card({
 }) {
   return (
     <div
-      className={`rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm backdrop-blur ${className}`}
+      className={`rounded-3xl border border-cream-300 bg-cream-50/90 p-6 shadow-[0_1px_2px_rgba(45,42,39,0.04),0_12px_32px_-14px_rgba(45,42,39,0.22)] ring-1 ring-ink/[0.03] backdrop-blur-xl ${className}`}
     >
       {children}
     </div>
@@ -24,12 +24,12 @@ export function Input({ label, className = "", ...rest }: InputProps) {
   return (
     <label className="block">
       {label && (
-        <span className="mb-1.5 block text-sm font-medium text-slate-600">
+        <span className="mb-1.5 block text-sm font-medium text-ink-muted">
           {label}
         </span>
       )}
       <input
-        className={`w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 ${className}`}
+        className={`w-full rounded-xl border border-cream-400 bg-cream-50 px-3.5 py-2.5 text-sm text-ink placeholder-ink-faint shadow-sm outline-none transition focus:border-burnt focus:ring-2 focus:ring-burnt/15 ${className}`}
         {...rest}
       />
     </label>
@@ -39,11 +39,11 @@ export function Input({ label, className = "", ...rest }: InputProps) {
 type PillTone = "green" | "amber" | "red" | "slate" | "blue";
 
 const pillTones: Record<PillTone, string> = {
-  green: "bg-emerald-50 text-emerald-700 ring-emerald-200",
-  amber: "bg-amber-50 text-amber-700 ring-amber-200",
-  red: "bg-rose-50 text-rose-700 ring-rose-200",
-  slate: "bg-slate-100 text-slate-600 ring-slate-200",
-  blue: "bg-blue-50 text-blue-700 ring-blue-200",
+  green: "bg-teal/10 text-teal-deep ring-teal/30",
+  amber: "bg-burnt/10 text-burnt ring-burnt/30",
+  red: "bg-rust/10 text-rust ring-rust/30",
+  slate: "bg-cream-300 text-ink-muted ring-cream-500",
+  blue: "bg-teal/10 text-teal-deep ring-teal/30",
 };
 
 export function Pill({

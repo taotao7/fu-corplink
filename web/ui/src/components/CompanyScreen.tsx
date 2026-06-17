@@ -26,12 +26,12 @@ export function CompanyScreen({ onDone }: { onDone: () => void }) {
   return (
     <Card>
       <div className="mb-5 flex items-center gap-3">
-        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
+        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-burnt/10 text-burnt">
           <Building2 className="h-5 w-5" />
         </div>
         <div>
-          <h2 className="text-base font-semibold text-slate-900">输入企业代号</h2>
-          <p className="text-sm text-slate-500">用于定位你所在企业的飞连服务器</p>
+          <h2 className="text-base font-semibold text-ink">输入企业代号</h2>
+          <p className="text-sm text-ink-muted">用于定位你所在企业的飞连服务器</p>
         </div>
       </div>
       <div className="space-y-4">
@@ -43,7 +43,7 @@ export function CompanyScreen({ onDone }: { onDone: () => void }) {
           onChange={(e) => setCode(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && submit()}
         />
-        {err && <p className="text-sm text-rose-600">{err}</p>}
+        {err && <p className="text-sm text-rust">{err}</p>}
         <Button onClick={submit} loading={loading} className="w-full">
           下一步
         </Button>

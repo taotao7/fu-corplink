@@ -1,6 +1,5 @@
 # --- secrets / runtime state (NEVER commit) ---
 config.json
-*config.json
 *cookies.json
 /etc/corplink/
 

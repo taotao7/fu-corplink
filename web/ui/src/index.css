@@ -1,5 +1,28 @@
 @import "tailwindcss";
 
+/* Analog Dream: Beige Terminal — warm gruvbox-light palette */
+@theme {
+  --color-cream-50: #faf8f4;
+  --color-cream-100: #f5f0e8;
+  --color-cream-200: #ede8e0;
+  --color-cream-300: #e8e0d6;
+  --color-cream-400: #d4c8b8;
+  --color-cream-500: #c4b8a8;
+
+  --color-ink: #2d2a27;
+  --color-ink-muted: #6b6560;
+  --color-ink-faint: #928374;
+
+  --color-burnt: #d65d0e;
+  --color-burnt-soft: #b57614;
+  --color-teal: #458588;
+  --color-teal-deep: #076678;
+  --color-olive: #79740e;
+  --color-rust: #9d0006;
+  --color-red: #cc241d;
+  --color-grape: #b16286;
+}
+
 :root {
   color-scheme: light;
 }
@@ -12,11 +35,18 @@ body,
 
 body {
   margin: 0;
-  background: linear-gradient(180deg, #f8fafc 0%, #eff6ff 100%);
-  color: #0f172a;
+  color: #2d2a27;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* warm beige base with two faint analog colour glows */
+  background-color: #f5f0e8;
+  background-image:
+    radial-gradient(60rem 40rem at 15% -10%, rgba(214, 93, 14, 0.1), transparent 60%),
+    radial-gradient(55rem 38rem at 100% 0%, rgba(69, 133, 136, 0.1), transparent 55%),
+    linear-gradient(180deg, #f8f5ee 0%, #ede8e0 100%);
+  background-attachment: fixed;
 }
 
 /* thin scrollbar for the node list */
@@ -24,6 +54,38 @@ body {
   width: 8px;
 }
 .scroll-thin::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: #c4b8a8;
   border-radius: 9999px;
+}
+.scroll-thin::-webkit-scrollbar-thumb:hover {
+  background: #928374;
+}
+
+/* gentle entrance for cards / panels */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-rise {
+  animation: rise 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* breathing glow for the live connection dot */
+@keyframes ping-soft {
+  0% {
+    box-shadow: 0 0 0 0 rgba(69, 133, 136, 0.45);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 7px rgba(69, 133, 136, 0);
+  }
+}
+.pulse-dot {
+  animation: ping-soft 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;
 }

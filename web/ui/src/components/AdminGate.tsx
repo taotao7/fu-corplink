@@ -26,12 +26,12 @@ export function AdminGate({ onAuthed }: { onAuthed: () => void }) {
   return (
     <Card>
       <div className="mb-5 flex items-center gap-3">
-        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-100 text-slate-600">
+        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-burnt/10 text-burnt">
           <Lock className="h-5 w-5" />
         </div>
         <div>
-          <h2 className="text-base font-semibold text-slate-900">管理员登录</h2>
-          <p className="text-sm text-slate-500">控制面板已启用访问鉴权</p>
+          <h2 className="text-base font-semibold text-ink">管理员登录</h2>
+          <p className="text-sm text-ink-muted">控制面板已启用访问鉴权</p>
         </div>
       </div>
       <div className="space-y-4">
@@ -43,7 +43,7 @@ export function AdminGate({ onAuthed }: { onAuthed: () => void }) {
           onChange={(e) => setPassword(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && submit()}
         />
-        {err && <p className="text-sm text-rose-600">{err}</p>}
+        {err && <p className="text-sm text-rust">{err}</p>}
         <Button onClick={submit} loading={loading} className="w-full">
           进入
         </Button>
