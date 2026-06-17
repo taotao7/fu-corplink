@@ -102,14 +102,17 @@ func (c *Client) SelectVPN(ctx context.Context, vpns []VPNInfo) (*VPNInfo, error
 				best = &vpns[i]
 			}
 		}
+		// The api_port probe is only a hint: many nodes firewall it while the
+		// WireGuard UDP vpn_port still works. If nothing answered the probe,
+		// fall back to the first node and let the real handshake decide.
 		if best == nil {
-			return nil, fmt.Errorf("no reachable vpn node")
+			best = &vpns[0]
 		}
 		if err := c.activateNode(*best); err != nil {
 			return nil, err
 		}
 		return best, nil
-	default: // default: first reachable
+	default: // default: prefer first probe-reachable, else first node
 		for i := range vpns {
 			if _, err := c.pingNodeLocked(ctx, vpns[i].IP, vpns[i].APIPort); err == nil {
 				if err := c.activateNode(vpns[i]); err != nil {
@@ -118,7 +121,10 @@ func (c *Client) SelectVPN(ctx context.Context, vpns []VPNInfo) (*VPNInfo, error
 				return &vpns[i], nil
 			}
 		}
-		return nil, fmt.Errorf("no reachable vpn node")
+		if err := c.activateNode(vpns[0]); err != nil {
+			return nil, err
+		}
+		return &vpns[0], nil
 	}
 }
 
