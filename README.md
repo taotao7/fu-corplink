@@ -132,14 +132,6 @@ curl --proxy http://127.0.0.1:8989 http://example.com
 
 控制面板地址由 `--listen` flag 指定（默认 `127.0.0.1:6151`）；代理地址改 `config.json` 或 UI 设置。Docker 用 `-p` 映射。
 
-## 命令行
-
-```
-corplink-web [--listen host:port] [config.json]
-```
-
-收到 SIGINT / SIGTERM 会先断开 VPN 再优雅退出。
-
 ## 已知限制
 
 - 仅 Linux / macOS 测试过，Windows 未端到端验证
@@ -148,9 +140,7 @@ corplink-web [--listen host:port] [config.json]
 
 ## 安全
 
-- 控制面板默认仅本机访问；暴露到网络请启用 `admin_auth_enabled` 或配合反向代理
 - 代理默认 `0.0.0.0:8989`，无鉴权；暴露到不受信任网络请启用 `proxy_auth_enabled`
-- `config.json` / `*cookies.json` 含私钥和登录态，不要 commit
 
 ## License
 
