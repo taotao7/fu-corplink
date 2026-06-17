@@ -1,0 +1,16 @@
+{
+  "company_name": "your-company-code",
+  "username": "your-username",
+  "socks_listen": "0.0.0.0:23456",
+  "vpn_server_id": 0,
+  "vpn_select_strategy": "default",
+  "route_mode": "full",
+
+  "_comment": "首次启动留空运行即可，进程会自动生成 device_id 与 WireGuard keypair。下面是可选的鉴权/代理字段：",
+  "admin_auth_enabled": false,
+  "admin_username": "",
+  "admin_password": "",
+  "proxy_auth_enabled": false,
+  "proxy_username": "",
+  "proxy_password": ""
+}

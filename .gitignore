@@ -1,0 +1,31 @@
+# --- secrets / runtime state (NEVER commit) ---
+config.json
+*config.json
+*cookies.json
+/etc/corplink/
+
+# --- Go ---
+/web/corplink-web
+/web/out/
+*.test
+*.out
+
+# --- Node / frontend ---
+/web/ui/node_modules/
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# NOTE: web/internal/server/dist (the built frontend) IS committed so the Go
+# binary builds out-of-the-box without a Node toolchain. Rebuild it with
+# `cd web/ui && npm run build`.
+
+# --- editor / OS ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# TS build cache
+*.tsbuildinfo

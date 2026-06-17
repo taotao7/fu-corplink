@@ -1,0 +1,7 @@
+**/node_modules
+web/ui/dist
+web/corplink-web
+*config.json
+*cookies.json
+.git
+.idea
