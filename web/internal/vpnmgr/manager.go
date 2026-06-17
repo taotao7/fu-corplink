@@ -134,12 +134,18 @@ func (m *Manager) Status() Status {
 	if m.proxy != nil && m.proxy.Addr() != "" {
 		proxyListen = m.proxy.Addr()
 	}
+	// ServerID reflects the user's current selection so the UI can highlight it:
+	// the live node once connected, otherwise the pinned config value.
+	serverID := m.conf.VPNServerID
+	if m.state == StateConnected && m.curID != 0 {
+		serverID = m.curID
+	}
 	return Status{
 		State:         m.state,
 		NeedCompany:   m.conf.Server == "",
 		CompanyName:   m.conf.CompanyName,
 		Username:      m.conf.Username,
-		ServerID:      m.curID,
+		ServerID:      serverID,
 		ServerName:    m.curName,
 		Connected:     m.state == StateConnected,
 		ProxyListen:   proxyListen,
