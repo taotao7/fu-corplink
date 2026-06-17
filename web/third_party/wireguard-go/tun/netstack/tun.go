@@ -52,6 +52,14 @@ type netTun struct {
 
 type Net netTun
 
+const (
+	netTunQueueSize  = 1024
+	netTunBatchSize  = 128
+	tcpBufferMin     = 4 << 10
+	tcpBufferDefault = 1 << 20
+	tcpBufferMax     = 8 << 20
+)
+
 func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device, *Net, error) {
 	opts := stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
@@ -62,7 +70,7 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 		ep:             channel.New(1024, uint32(mtu), ""),
 		stack:          stack.New(opts),
 		events:         make(chan tun.Event, 10),
-		incomingPacket: make(chan *buffer.View),
+		incomingPacket: make(chan *buffer.View, netTunQueueSize),
 		dnsServers:     dnsServers,
 		mtu:            mtu,
 	}
@@ -70,6 +78,24 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 	tcpipErr := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sackEnabledOpt)
 	if tcpipErr != nil {
 		return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
+	}
+	sendBufferOpt := tcpip.TCPSendBufferSizeRangeOption{
+		Min:     tcpBufferMin,
+		Default: tcpBufferDefault,
+		Max:     tcpBufferMax,
+	}
+	tcpipErr = dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sendBufferOpt)
+	if tcpipErr != nil {
+		return nil, nil, fmt.Errorf("could not set TCP send buffer range: %v", tcpipErr)
+	}
+	receiveBufferOpt := tcpip.TCPReceiveBufferSizeRangeOption{
+		Min:     tcpBufferMin,
+		Default: tcpBufferDefault,
+		Max:     tcpBufferMax,
+	}
+	tcpipErr = dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &receiveBufferOpt)
+	if tcpipErr != nil {
+		return nil, nil, fmt.Errorf("could not set TCP receive buffer range: %v", tcpipErr)
 	}
 	dev.notifyHandle = dev.ep.AddNotify(dev)
 	tcpipErr = dev.stack.CreateNIC(1, dev.ep)
@@ -126,12 +152,33 @@ func (tun *netTun) Read(buf [][]byte, sizes []int, offset int) (int, error) {
 		return 0, os.ErrClosed
 	}
 
-	n, err := view.Read(buf[0][offset:])
-	if err != nil {
+	readOne := func(i int, view *buffer.View) error {
+		n, err := view.Read(buf[i][offset:])
+		if err != nil {
+			return err
+		}
+		sizes[i] = n
+		return nil
+	}
+	if err := readOne(0, view); err != nil {
 		return 0, err
 	}
-	sizes[0] = n
-	return 1, nil
+	count := 1
+	for count < len(buf) {
+		select {
+		case view, ok := <-tun.incomingPacket:
+			if !ok {
+				return count, nil
+			}
+			if err := readOne(count, view); err != nil {
+				return count, err
+			}
+			count++
+		default:
+			return count, nil
+		}
+	}
+	return count, nil
 }
 
 func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
@@ -188,7 +235,7 @@ func (tun *netTun) MTU() (int, error) {
 }
 
 func (tun *netTun) BatchSize() int {
-	return 1
+	return netTunBatchSize
 }
 
 func convertToFullAddr(endpoint netip.AddrPort) (tcpip.FullAddress, tcpip.NetworkProtocolNumber) {

@@ -17,11 +17,10 @@
 ### Docker
 
 ```bash
-docker run -d --name corplink-web \
-  --restart unless-stopped \
+docker build -t fu-corplink:dev .
+docker run -d --name fu-corplink \
   -p 6151:6151 -p 8989:8989 \
-  -v corplink-web-data:/etc/corplink \
-  riba2534/corplink-web:latest
+  -v fu-corplink-data:/etc/corplink fu-corplink:dev
 ```
 
 ### Docker Compose
@@ -29,11 +28,11 @@ docker run -d --name corplink-web \
 ```yaml
 services:
   corplink-web:
-    image: riba2534/corplink-web:latest
+    image: riba2534/fu-corplink:dev
     restart: unless-stopped
     ports:
-      - "6151:6151"   # 控制面板
-      - "8989:8989"   # 混合代理
+      - "6151:6151" # 控制面板
+      - "8989:8989" # 混合代理
     volumes:
       - corplink-web-data:/etc/corplink
 
@@ -79,13 +78,13 @@ curl --proxy http://127.0.0.1:8989 http://example.com
 
 **各平台配置**（代理地址填 `127.0.0.1:8989`，局域网场景填服务端 IP）：
 
-| 平台 | 方式 |
-|------|------|
-| macOS | 系统设置 → 网络 → Wi-Fi → 代理 → HTTP / HTTPS / SOCKS |
-| Linux | `export http_proxy=http://127.0.0.1:8989 https_proxy=http://127.0.0.1:8989` |
-| Windows | 设置 → 网络和 Internet → 代理 → 手动 |
-| 浏览器 | SwitchyOmega 等插件 |
-| 手机 | Wi-Fi 代理设置（需代理端口暴露在局域网） |
+| 平台    | 方式                                                                        |
+| ------- | --------------------------------------------------------------------------- |
+| macOS   | 系统设置 → 网络 → Wi-Fi → 代理 → HTTP / HTTPS / SOCKS                       |
+| Linux   | `export http_proxy=http://127.0.0.1:8989 https_proxy=http://127.0.0.1:8989` |
+| Windows | 设置 → 网络和 Internet → 代理 → 手动                                        |
+| 浏览器  | SwitchyOmega 等插件                                                         |
+| 手机    | Wi-Fi 代理设置（需代理端口暴露在局域网）                                    |
 
 ## 配置
 
@@ -93,12 +92,12 @@ curl --proxy http://127.0.0.1:8989 http://example.com
 
 ### 常用字段
 
-| 字段 | 默认值 | 说明 |
-|------|--------|------|
-| `socks_listen` | `0.0.0.0:8989` | 代理监听地址 |
-| `vpn_server_id` | `0` | 固定节点 ID，0 = 按策略选 |
-| `vpn_select_strategy` | `default` | `default` / `latency` |
-| `route_mode` | `full` | `full`（全局）/ `split`（仅内网） |
+| 字段                  | 默认值         | 说明                              |
+| --------------------- | -------------- | --------------------------------- |
+| `socks_listen`        | `0.0.0.0:8989` | 代理监听地址                      |
+| `vpn_server_id`       | `0`            | 固定节点 ID，0 = 按策略选         |
+| `vpn_select_strategy` | `default`      | `default` / `latency`             |
+| `route_mode`          | `full`         | `full`（全局）/ `split`（仅内网） |
 
 `socks_listen`、节点策略、路由模式也可在 UI「设置」中修改，下次连接生效。
 
@@ -126,8 +125,8 @@ curl --proxy http://127.0.0.1:8989 http://example.com
 
 ## 端口
 
-| 端口 | 用途 | 何时可用 |
-|------|------|----------|
+| 端口   | 用途                   | 何时可用   |
+| ------ | ---------------------- | ---------- |
 | `6151` | 控制面板（前端 + API） | 启动即监听 |
 | `8989` | HTTP / SOCKS5 混合代理 | VPN 连接后 |
 

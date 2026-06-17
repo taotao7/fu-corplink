@@ -18,7 +18,14 @@ const (
 	dnsCacheTTL      = 5 * time.Minute
 	dnsLookupRetries = 4
 	proxyDialTimeout = 15 * time.Second
+	proxyCopyBufSize = 256 << 10
 )
+
+var proxyCopyBufferPool = sync.Pool{
+	New: func() any {
+		return make([]byte, proxyCopyBufSize)
+	},
+}
 
 // Dialer dials TCP connections to a host:port, typically through the tunnel.
 type Dialer interface {
@@ -127,7 +134,7 @@ func (p *MixedProxy) acceptLoop() {
 
 func (p *MixedProxy) handle(client net.Conn) {
 	defer client.Close()
-	setNoDelay(client)
+	tuneProxyConn(client)
 	_ = client.SetDeadline(time.Now().Add(30 * time.Second))
 
 	br := bufio.NewReader(client)
@@ -203,7 +210,7 @@ func (p *MixedProxy) handleSocks5(client net.Conn, br *bufio.Reader) {
 		socks5Reply(client, 0x05) // connection refused
 		return
 	}
-	setNoDelay(upstream)
+	tuneProxyConn(upstream)
 	defer upstream.Close()
 	socks5Reply(client, 0x00) // succeeded
 
@@ -312,12 +319,24 @@ func isBenchmarkFakeIP(ip net.IP) bool {
 	return ip4[0] == 198 && (ip4[1] == 18 || ip4[1] == 19)
 }
 
-func setNoDelay(conn net.Conn) {
+func tuneProxyConn(conn net.Conn) {
 	type noDelayer interface {
 		SetNoDelay(bool) error
 	}
 	if c, ok := conn.(noDelayer); ok {
 		_ = c.SetNoDelay(true)
+	}
+	type readBufferSetter interface {
+		SetReadBuffer(int) error
+	}
+	if c, ok := conn.(readBufferSetter); ok {
+		_ = c.SetReadBuffer(proxyCopyBufSize)
+	}
+	type writeBufferSetter interface {
+		SetWriteBuffer(int) error
+	}
+	if c, ok := conn.(writeBufferSetter); ok {
+		_ = c.SetWriteBuffer(proxyCopyBufSize)
 	}
 }
 
@@ -400,12 +419,24 @@ func containsByte(b []byte, target byte) bool {
 func relay(client net.Conn, upstream net.Conn, clientBuf *bufio.Reader) {
 	done := make(chan struct{}, 2)
 	go func() {
-		_, _ = io.Copy(upstream, clientBuf)
+		copyAndCloseWrite(upstream, clientBuf)
 		done <- struct{}{}
 	}()
 	go func() {
-		_, _ = io.Copy(client, upstream)
+		copyAndCloseWrite(client, upstream)
 		done <- struct{}{}
 	}()
 	<-done
+}
+
+func copyAndCloseWrite(dst net.Conn, src io.Reader) {
+	buf := proxyCopyBufferPool.Get().([]byte)
+	_, _ = io.CopyBuffer(dst, src, buf)
+	proxyCopyBufferPool.Put(buf)
+	type closeWriter interface {
+		CloseWrite() error
+	}
+	if c, ok := dst.(closeWriter); ok {
+		_ = c.CloseWrite()
+	}
 }

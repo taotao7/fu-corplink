@@ -61,6 +61,7 @@ func (p *MixedProxy) handleConnect(client net.Conn, req *http.Request) {
 		_, _ = client.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"))
 		return
 	}
+	tuneProxyConn(upstream)
 	defer upstream.Close()
 	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		return
@@ -90,6 +91,7 @@ func (p *MixedProxy) handleForward(client net.Conn, br *bufio.Reader, req *http.
 		_, _ = client.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"))
 		return
 	}
+	tuneProxyConn(upstream)
 	defer upstream.Close()
 
 	// strip hop-by-hop / proxy headers and forward as an origin-form request

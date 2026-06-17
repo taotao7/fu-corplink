@@ -34,13 +34,18 @@ func NewTCPBind() Bind {
 }
 
 type TcpBind struct {
-	// TODO: do we need mutex?
-	tcpConnMap common.SyncMap[string, *net.TCPConn]
+	connMu     sync.Mutex
+	tcpConnMap common.SyncMap[string, *tcpConnState]
 	listener   *net.TCPListener
 
 	dataPool  sync.Pool
 	recvChan  chan *recvData
 	closeChan chan struct{}
+}
+
+type tcpConnState struct {
+	conn    *net.TCPConn
+	writeMu sync.Mutex
 }
 
 type reqLen [4]byte
@@ -69,7 +74,14 @@ func (t *TcpBind) makeReceive() ReceiveFunc {
 			return 0, nil
 		}
 
-		count := 0
+		readOne := func(data *recvData) {
+			sizes[n] = data.size
+			copy(bufs[n], data.buff[:sizes[n]])
+			eps[n] = data.endpoint
+			t.dataPool.Put(data)
+			n++
+		}
+
 		select {
 		case <-t.closeChan:
 			return 0, net.ErrClosed
@@ -77,21 +89,30 @@ func (t *TcpBind) makeReceive() ReceiveFunc {
 			if data == nil {
 				return 0, nil
 			}
-			defer t.dataPool.Put(data)
-			sizes[count] = data.size
-			copy(bufs[count], data.buff[:sizes[count]])
-			eps[count] = data.endpoint
-			count++
-			return count, nil
+			readOne(data)
 		}
+
+		for n < len(bufs) {
+			select {
+			case data := <-t.recvChan:
+				if data == nil {
+					return n, nil
+				}
+				readOne(data)
+			default:
+				return n, nil
+			}
+		}
+		return n, nil
 	}
 }
 
-func (t *TcpBind) handleConn(conn *net.TCPConn, endpoint Endpoint) {
+func (t *TcpBind) handleConn(state *tcpConnState, endpoint Endpoint) {
 	go func() {
+		conn := state.conn
 		tuneTCPConn(conn)
 		defer func() {
-			t.deleteConn(endpoint, conn)
+			t.deleteConn(endpoint, state)
 			_ = conn.Close()
 		}()
 		for {
@@ -130,9 +151,9 @@ func (t *TcpBind) handleConn(conn *net.TCPConn, endpoint Endpoint) {
 	}()
 }
 
-func (t *TcpBind) deleteConn(endpoint Endpoint, conn *net.TCPConn) {
+func (t *TcpBind) deleteConn(endpoint Endpoint, state *tcpConnState) {
 	key := endpoint.DstToString()
-	if current, ok := t.tcpConnMap.Load(key); ok && current == conn {
+	if current, ok := t.tcpConnMap.Load(key); ok && current == state {
 		t.tcpConnMap.Delete(key)
 	}
 }
@@ -154,8 +175,9 @@ func (t *TcpBind) accept() {
 		tuneTCPConn(conn)
 		addrPort := conn.RemoteAddr().(*net.TCPAddr).AddrPort()
 		endpoint := &StdNetEndpoint{AddrPort: addrPort}
-		t.tcpConnMap.Store(endpoint.DstToString(), conn)
-		t.handleConn(conn, endpoint)
+		state := &tcpConnState{conn: conn}
+		t.tcpConnMap.Store(endpoint.DstToString(), state)
+		t.handleConn(state, endpoint)
 	}
 }
 
@@ -174,8 +196,8 @@ func (t *TcpBind) Open(port uint16) (fns []ReceiveFunc, actualPort uint16, err e
 
 func (t *TcpBind) Close() error {
 	var err error
-	t.tcpConnMap.Range(func(endpoint string, v *net.TCPConn) bool {
-		e := v.Close()
+	t.tcpConnMap.Range(func(endpoint string, v *tcpConnState) bool {
+		e := v.conn.Close()
 		if e != nil {
 			err = e
 		}
@@ -190,10 +212,18 @@ func (t *TcpBind) Close() error {
 	return err
 }
 
-func (t *TcpBind) getConn(endpoint Endpoint) (*net.TCPConn, error) {
-	conn, ok := t.tcpConnMap.Load(endpoint.DstToString())
+func (t *TcpBind) getConn(endpoint Endpoint) (*tcpConnState, error) {
+	key := endpoint.DstToString()
+	state, ok := t.tcpConnMap.Load(key)
 	if ok {
-		return conn, nil
+		return state, nil
+	}
+
+	t.connMu.Lock()
+	defer t.connMu.Unlock()
+	state, ok = t.tcpConnMap.Load(key)
+	if ok {
+		return state, nil
 	}
 
 	ip := make(net.IP, net.IPv6len)
@@ -214,26 +244,36 @@ func (t *TcpBind) getConn(endpoint Endpoint) (*net.TCPConn, error) {
 		return nil, err
 	}
 	tuneTCPConn(conn)
-	t.handleConn(conn, endpoint)
-	t.tcpConnMap.Store(endpoint.DstToString(), conn)
-	return conn, nil
+	state = &tcpConnState{conn: conn}
+	t.tcpConnMap.Store(key, state)
+	t.handleConn(state, endpoint)
+	return state, nil
 }
 
 func (t *TcpBind) Send(bufs [][]byte, endpoint Endpoint) error {
-	conn, err := t.getConn(endpoint)
+	state, err := t.getConn(endpoint)
 	if err != nil {
 		return err
 	}
-	for _, buf := range bufs {
-		var l reqLen
-		l.FromLen(len(buf))
-		buffers := net.Buffers{l[:], buf}
-		_, err := buffers.WriteTo(conn)
-		if err != nil {
-			t.deleteConn(endpoint, conn)
-			_ = conn.Close()
-			return err
+	lens := make([]reqLen, len(bufs))
+	buffers := make(net.Buffers, 0, len(bufs)*2)
+	for i, buf := range bufs {
+		if len(buf) == 0 {
+			continue
 		}
+		lens[i].FromLen(len(buf))
+		buffers = append(buffers, lens[i][:], buf)
+	}
+	if len(buffers) == 0 {
+		return nil
+	}
+	state.writeMu.Lock()
+	_, err = buffers.WriteTo(state.conn)
+	state.writeMu.Unlock()
+	if err != nil {
+		t.deleteConn(endpoint, state)
+		_ = state.conn.Close()
+		return err
 	}
 	return nil
 }

@@ -8,7 +8,6 @@
 package conn
 
 import (
-	"net"
 	"runtime"
 
 	"golang.org/x/sys/unix"
@@ -70,17 +69,22 @@ func (t *TcpBind) SetMark(mark uint32) error {
 		return nil
 	}
 	var err error
-	t.tcpConnMap.Range(func(_ string, v *net.TCPConn) bool {
-		fd, e := v.SyscallConn()
+	t.tcpConnMap.Range(func(_ string, v *tcpConnState) bool {
+		fd, e := v.conn.SyscallConn()
 		if e != nil {
 			err = e
 			return false
 		}
+		var operr error
 		e = fd.Control(func(fd uintptr) {
-			err = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, fwmarkIoctl, int(mark))
+			operr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, fwmarkIoctl, int(mark))
 		})
-		if e == nil {
+		if e != nil {
 			err = e
+			return false
+		}
+		if operr != nil {
+			err = operr
 			return false
 		}
 		return true
