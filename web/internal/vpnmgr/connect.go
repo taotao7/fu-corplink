@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"corplink-web/internal/corplink"
@@ -52,16 +53,18 @@ func (m *Manager) connectReal(ctx context.Context, otp string) error {
 		return err
 	}
 
-	// A 2FA code is needed unless a TOTP secret is configured or an SSO login
-	// already verified. Require an explicit otp only when we can't generate one.
-	if otp == "" && !m.client.HasOTPSecret() && !isTpsPlatform(m.conf.Platform) {
-		return ErrNeedOTP
-	}
-
+	// Don't pre-gate on 2FA. Most accounts either have no 2FA at all (an empty
+	// code connects fine) or have a TOTP secret we generate automatically. Try
+	// the handshake first; only prompt for a code if the server actually
+	// rejects it for an OTP-related reason.
 	info, err := m.client.FetchPeerInfo(ctx, otp)
 	if err != nil {
 		if corplink.IsLoggedOut(err) {
 			m.setState(StateLoggedOut, err.Error())
+			return err
+		}
+		if otp == "" && !m.client.HasOTPSecret() && looksLikeOTPError(err) {
+			return ErrNeedOTP
 		}
 		return err
 	}
@@ -232,4 +235,22 @@ func routeModeReport(mode string) string {
 
 func isTpsPlatform(platform string) bool {
 	return platform == corplink.PlatformLark || platform == corplink.PlatformOIDC
+}
+
+var _ = isTpsPlatform // reserved: SSO logins skip the OTP prompt entirely
+
+// looksLikeOTPError reports whether a FetchPeerInfo failure is the server
+// asking for a 2FA code, as opposed to any other error. Matching is loose
+// because the upstream API returns localized/varied messages.
+func looksLikeOTPError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, kw := range []string{"otp", "2fa", "two-factor", "two factor", "verif", "动态码", "验证码", "二次"} {
+		if strings.Contains(msg, kw) {
+			return true
+		}
+	}
+	return false
 }
