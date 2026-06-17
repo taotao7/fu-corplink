@@ -78,7 +78,7 @@ export function ConnectionPanel({
             total={traffic ? formatBytes(traffic.rx_total) : "—"}
           />
           <RateCard
-            icon={<ArrowUp className="h-4 w-4 text-indigo-600" />}
+            icon={<ArrowUp className="h-4 w-4 text-blue-600" />}
             label="上传"
             rate={traffic ? formatRate(traffic.tx_bps) : "—"}
             total={traffic ? formatBytes(traffic.tx_total) : "—"}

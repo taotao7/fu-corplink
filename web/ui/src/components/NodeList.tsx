@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { type Server } from "../api";
 import { Pill } from "../ui/Card";
-import { Pin, PinOff, Search, RefreshCw } from "lucide-react";
+import { Pin, Check, Search, RefreshCw } from "lucide-react";
 
 function latencyTone(ms: number): "green" | "amber" | "red" | "slate" {
   if (ms < 0) return "red";
@@ -50,7 +50,7 @@ export function NodeList({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="搜索节点"
-            className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+            className="w-full rounded-xl border border-slate-200 bg-white py-2 pl-9 pr-3 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
           />
         </div>
         <button
@@ -74,31 +74,47 @@ export function NodeList({
           return (
             <div
               key={s.id}
-              className={`flex items-center justify-between rounded-xl border px-4 py-3 transition ${
+              role="button"
+              tabIndex={0}
+              onClick={() => onPin(pinned ? 0 : s.id)}
+              onKeyDown={(e) =>
+                (e.key === "Enter" || e.key === " ") && onPin(pinned ? 0 : s.id)
+              }
+              className={`flex cursor-pointer items-center justify-between rounded-xl border px-4 py-3 transition ${
                 pinned
-                  ? "border-indigo-200 bg-indigo-50/50"
-                  : "border-slate-200 bg-white hover:bg-slate-50"
+                  ? "border-blue-300 bg-blue-50 ring-1 ring-blue-200"
+                  : "border-slate-200 bg-white hover:border-blue-200 hover:bg-slate-50"
               }`}
             >
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-slate-800">
-                  {s.name || s.en_name}
-                </p>
-                <p className="truncate text-xs text-slate-400">{s.ip}</p>
+              <div className="flex min-w-0 items-center gap-2.5">
+                <span
+                  className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${
+                    pinned ? "border-blue-500 bg-blue-500" : "border-slate-300"
+                  }`}
+                >
+                  {pinned && <Check className="h-3 w-3 text-white" />}
+                </span>
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-slate-800">
+                    {s.name || s.en_name}
+                  </p>
+                  <p className="truncate text-xs text-slate-400">{s.ip}</p>
+                </div>
               </div>
               <div className="flex items-center gap-3">
                 <Pill tone={latencyTone(s.latency_ms)}>{latencyText(s.latency_ms)}</Pill>
-                <button
-                  onClick={() => onPin(pinned ? 0 : s.id)}
-                  className={`rounded-lg p-1.5 transition ${
-                    pinned
-                      ? "text-indigo-600 hover:bg-indigo-100"
-                      : "text-slate-400 hover:bg-slate-100 hover:text-slate-600"
-                  }`}
-                  title={pinned ? "取消固定" : "固定此节点"}
-                >
-                  {pinned ? <Pin className="h-4 w-4" /> : <PinOff className="h-4 w-4" />}
-                </button>
+                {pinned && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onPin(0);
+                    }}
+                    className="rounded-lg p-1.5 text-blue-600 transition hover:bg-blue-100"
+                    title="取消选择"
+                  >
+                    <Pin className="h-4 w-4" />
+                  </button>
+                )}
               </div>
             </div>
           );

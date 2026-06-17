@@ -170,8 +170,19 @@ export default function App() {
                   loading={connecting}
                   onClick={() => doConnect(state!.server_id)}
                 >
-                  {state!.server_id ? "连接固定节点" : "自动选择并连接"}
+                  {state!.server_id
+                    ? `连接 ${
+                        servers.find((s) => s.id === state!.server_id)?.name ||
+                        servers.find((s) => s.id === state!.server_id)?.en_name ||
+                        "所选节点"
+                      }`
+                    : "自动选择并连接"}
                 </Button>
+                <p className="mt-2 text-center text-xs text-slate-400">
+                  {state!.server_id
+                    ? "已选定节点，点击上方按钮连接"
+                    : "点击列表中的节点可指定，不选则自动挑选"}
+                </p>
               </div>
             </Card>
           )}
@@ -243,7 +254,7 @@ function OtpDialog({
           value={value}
           onChange={(e) => onChange(e.target.value.replace(/\D/g, ""))}
           onKeyDown={(e) => e.key === "Enter" && onSubmit()}
-          className="mb-4 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-center text-lg tracking-[0.4em] outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+          className="mb-4 w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-center text-lg tracking-[0.4em] outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
           placeholder="000000"
         />
         <div className="flex justify-end gap-2">

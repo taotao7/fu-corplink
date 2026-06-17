@@ -76,7 +76,7 @@ function TabButton({
     <button
       onClick={onClick}
       className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium transition ${
-        active ? "bg-white text-indigo-600 shadow-sm" : "text-slate-500 hover:text-slate-700"
+        active ? "bg-white text-blue-600 shadow-sm" : "text-slate-500 hover:text-slate-700"
       }`}
     >
       {children}
@@ -125,7 +125,7 @@ function PasswordForm({
         <select
           value={platform}
           onChange={(e) => setPlatform(e.target.value)}
-          className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"
+          className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
         >
           <option value="feilian">飞连密码</option>
           <option value="feilian_v1">飞连密码 (v1)</option>

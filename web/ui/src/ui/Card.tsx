@@ -29,21 +29,21 @@ export function Input({ label, className = "", ...rest }: InputProps) {
         </span>
       )}
       <input
-        className={`w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 ${className}`}
+        className={`w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 ${className}`}
         {...rest}
       />
     </label>
   );
 }
 
-type PillTone = "green" | "amber" | "red" | "slate" | "indigo";
+type PillTone = "green" | "amber" | "red" | "slate" | "blue";
 
 const pillTones: Record<PillTone, string> = {
   green: "bg-emerald-50 text-emerald-700 ring-emerald-200",
   amber: "bg-amber-50 text-amber-700 ring-amber-200",
   red: "bg-rose-50 text-rose-700 ring-rose-200",
   slate: "bg-slate-100 text-slate-600 ring-slate-200",
-  indigo: "bg-indigo-50 text-indigo-700 ring-indigo-200",
+  blue: "bg-blue-50 text-blue-700 ring-blue-200",
 };
 
 export function Pill({

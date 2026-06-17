@@ -24,7 +24,7 @@ function statusPill(state: State["state"]) {
       );
     case "logged_in":
       return (
-        <Pill tone="indigo">
+        <Pill tone="blue">
           <WifiOff className="h-3.5 w-3.5" /> 未连接
         </Pill>
       );
@@ -45,7 +45,7 @@ export function Header({ state }: { state: State | null }) {
         <div>
           <h1 className="flex items-center gap-1.5 text-lg font-semibold text-slate-900">
             CorpLink Web
-            <ShieldCheck className="h-4 w-4 text-indigo-500" />
+            <ShieldCheck className="h-4 w-4 text-blue-500" />
           </h1>
           {state?.company_name && (
             <p className="text-xs text-slate-500">{state.company_name}</p>
