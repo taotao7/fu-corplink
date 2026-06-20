@@ -64,8 +64,8 @@ export function TrafficFlow({
   const rx = traffic?.rx_bps ?? 0;
   const tx = traffic?.tx_bps ?? 0;
   const staleness = clampPct(traffic?.handshake_stale_pct ?? traffic?.loss_pct ?? 0);
-  const health = 100 - staleness;
   const age = traffic?.handshake_age_sec ?? -1;
+  const linkLabel = age < 0 ? "无握手" : staleness >= 100 ? "异常" : "正常";
 
   const tierRx = useMemo(() => flowTier(rx), [rx]);
   const tierTx = useMemo(() => flowTier(tx), [tx]);
@@ -89,7 +89,7 @@ export function TrafficFlow({
           viewBox="0 0 360 130"
           className="relative w-full"
           role="img"
-          aria-label={`下载 ${formatRate(rx)}，上传 ${formatRate(tx)}，链路健康 ${health.toFixed(0)}%，握手 ${formatHandshakeAge(age)}`}
+          aria-label={`下载 ${formatRate(rx)}，上传 ${formatRate(tx)}，链路 ${linkLabel}，握手 ${formatHandshakeAge(age)}`}
         >
           {/* chips: local (left) and peer (right) */}
           <Chip x={8} label="本机" />
@@ -352,9 +352,9 @@ function Readout({ label, rate, total, color }: { label: string; rate: string; t
 }
 
 function LinkHealthBadge({ staleness, age, dead }: { staleness: number; age: number; dead: boolean }) {
-  const color = stalenessColor(staleness);
-  const health = 100 - staleness;
-  const label = dead ? "通道断开" : staleness <= 0 ? "链路良好" : staleness < 15 ? "握手稍旧" : staleness < 50 ? "需要关注" : "链路异常";
+  const color = age < 0 ? "var(--color-ink-faint)" : stalenessColor(staleness);
+  const label = age < 0 ? "无握手" : dead || staleness >= 100 ? "异常" : "正常";
+  const screenReaderLabel = age < 0 ? "尚无握手" : dead || staleness >= 100 ? "链路异常" : "链路正常";
   const ageText = formatHandshakeAge(age);
   return (
     <div
@@ -363,10 +363,10 @@ function LinkHealthBadge({ staleness, age, dead }: { staleness: number; age: num
     >
       <p className="text-[10px] font-semibold uppercase tracking-wide text-ink-faint">链路</p>
       <p className="mt-0.5 text-base font-bold tabular-nums tracking-tight" style={{ color }}>
-        {health.toFixed(0)}%
+        {label}
       </p>
       <p className="mt-0.5 text-[10px] text-ink-faint">握手 {ageText}</p>
-      <p className="sr-only">{label}</p>
+      <p className="sr-only">{screenReaderLabel}</p>
     </div>
   );
 }

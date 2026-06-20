@@ -224,7 +224,6 @@ func (m *Manager) sampleOnce() {
 // the timeout, transparently re-establish the tunnel so the connection self-heals
 // instead of stranding the user until they reconnect by hand.
 func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf) {
-	const timeout = 90 * time.Second
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -242,7 +241,7 @@ func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf
 			if last == 0 {
 				continue
 			}
-			if time.Since(time.Unix(last, 0)) > timeout {
+			if time.Since(time.Unix(last, 0)) > handshakeStaleAfter {
 				// reconnect runs the teardown that cancels this loop's ctx, so
 				// returning here lets the freshly-spawned watcher take over.
 				go m.reconnect()

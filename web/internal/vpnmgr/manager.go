@@ -20,6 +20,9 @@ const (
 	StateDisconnecting ConnState = "disconnecting"
 )
 
+const handshakeStaleAfter = 90 * time.Second
+const handshakeStaleAfterSec = int64(handshakeStaleAfter / time.Second)
+
 // Status is a snapshot of the manager's current state for the UI.
 type Status struct {
 	State         ConnState `json:"state"`
@@ -44,8 +47,9 @@ type TrafficSample struct {
 	ProxyListen string  `json:"proxy_listen"`
 	Since       int64   `json:"since"` // unix seconds the connection started
 
-	// WireGuard peer stats. WireGuard has no per-packet loss counter; the
-	// staleness score below is derived from the latest handshake age.
+	// WireGuard peer stats. WireGuard has no per-packet loss counter. The
+	// staleness score below only marks clear handshake failure/timeout states;
+	// a normally idle tunnel can have an older handshake timestamp.
 	// HandshakeAgeSec is -1 when no handshake has ever completed.
 	LastHandshake     int64   `json:"last_handshake"` // unix sec, 0 if never
 	HandshakeAgeSec   int64   `json:"handshake_age_sec"`
@@ -261,23 +265,17 @@ func (m *Manager) Traffic() TrafficSample {
 	return sample
 }
 
-// handshakeStalenessFromAge converts WireGuard handshake age into a 0..100
-// connectivity risk score. With keepalive_interval=10s, a fresh handshake
-// (<15s) means the tunnel is healthy. As staleness grows the tunnel is
-// increasingly suspicious; beyond the reconnect threshold (90s) it is treated
-// as dead. age == -1 means no handshake has ever completed.
+// handshakeStalenessFromAge converts WireGuard handshake age into a coarse
+// 0/100 timeout flag. WireGuard's latest-handshake timestamp is not refreshed
+// continuously on a healthy idle tunnel, so intermediate ages should not be
+// presented as a gradually degrading link. age == -1 means no handshake has
+// ever completed.
 func handshakeStalenessFromAge(ageSec int64) float64 {
 	if ageSec < 0 {
 		return 100
 	}
-	switch {
-	case ageSec <= 15:
-		return 0
-	case ageSec <= 60:
-		return float64(ageSec-15) / 45.0 * 50 // 0 -> 50 over 15..60s
-	case ageSec < 90:
-		return 50 + float64(ageSec-60)/30.0*50 // 50 -> 100 over 60..90s
-	default:
+	if ageSec >= handshakeStaleAfterSec {
 		return 100
 	}
+	return 0
 }

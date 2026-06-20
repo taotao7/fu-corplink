@@ -60,8 +60,8 @@ export interface Traffic {
   rx_total: number;
   proxy_listen: string;
   since: number;
-  // WireGuard peer stats. WireGuard has no per-packet loss counter;
-  // handshake_stale_pct is derived from the latest handshake age (0..100).
+  // WireGuard peer stats. WireGuard has no per-packet loss counter.
+  // handshake_stale_pct only marks clear handshake timeout states (0 or 100).
   // handshake_age_sec is -1 when no handshake has ever completed.
   last_handshake: number;
   handshake_age_sec: number;
