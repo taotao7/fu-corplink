@@ -22,16 +22,16 @@ const (
 
 // Status is a snapshot of the manager's current state for the UI.
 type Status struct {
-	State       ConnState `json:"state"`
-	NeedCompany bool      `json:"need_company"`
-	CompanyName string    `json:"company_name"`
-	Username    string    `json:"username"`
-	ServerID    int       `json:"server_id"`
-	ServerName  string    `json:"server_name"`
-	Connected   bool      `json:"connected"`
-	ProxyListen string    `json:"proxy_listen"`
-	AdminRequired bool    `json:"admin_required"`
-	Error       string    `json:"error,omitempty"`
+	State         ConnState `json:"state"`
+	NeedCompany   bool      `json:"need_company"`
+	CompanyName   string    `json:"company_name"`
+	Username      string    `json:"username"`
+	ServerID      int       `json:"server_id"`
+	ServerName    string    `json:"server_name"`
+	Connected     bool      `json:"connected"`
+	ProxyListen   string    `json:"proxy_listen"`
+	AdminRequired bool      `json:"admin_required"`
+	Error         string    `json:"error,omitempty"`
 }
 
 // TrafficSample is a point-in-time traffic snapshot.
@@ -43,6 +43,16 @@ type TrafficSample struct {
 	RxTotal     int64   `json:"rx_total"`
 	ProxyListen string  `json:"proxy_listen"`
 	Since       int64   `json:"since"` // unix seconds the connection started
+
+	// WireGuard peer stats. WireGuard has no per-packet loss counter; the
+	// staleness score below is derived from the latest handshake age.
+	// HandshakeAgeSec is -1 when no handshake has ever completed.
+	LastHandshake     int64   `json:"last_handshake"` // unix sec, 0 if never
+	HandshakeAgeSec   int64   `json:"handshake_age_sec"`
+	WgTxBytes         int64   `json:"wg_tx_bytes"` // wire-level bytes sent to peer
+	WgRxBytes         int64   `json:"wg_rx_bytes"` // wire-level bytes received from peer
+	HandshakeStalePct float64 `json:"handshake_stale_pct"`
+	LossPct           float64 `json:"loss_pct"` // deprecated: handshake_stale_pct compatibility alias
 }
 
 // Server is a UI-facing VPN node entry.
@@ -63,14 +73,14 @@ type Manager struct {
 	conf   *corplink.Config
 	client *corplink.Client
 
-	mu      sync.Mutex
-	state   ConnState
-	lastErr string
-	device  *corplink.NetstackDevice
-	proxy   *corplink.MixedProxy
-	since   time.Time
-	curID   int
-	curName string
+	mu         sync.Mutex
+	state      ConnState
+	lastErr    string
+	device     *corplink.NetstackDevice
+	proxy      *corplink.MixedProxy
+	since      time.Time
+	curID      int
+	curName    string
 	curAddress string
 
 	// traffic sampling
@@ -79,6 +89,12 @@ type Manager struct {
 	lastTx         int64
 	txBps          float64
 	rxBps          float64
+
+	// cached WireGuard peer stats (refreshed by runSampler so Traffic() stays
+	// cheap and never hits the wg-go UAPI on the UI poll path).
+	lastHandshake int64
+	wgTxBytes     int64
+	wgRxBytes     int64
 
 	serverCache []Server
 	cacheMu     sync.Mutex
@@ -228,9 +244,40 @@ func (m *Manager) Traffic() TrafficSample {
 	if m.device != nil {
 		sample.RxTotal = m.lastRx
 		sample.TxTotal = m.lastTx
+		sample.LastHandshake = m.lastHandshake
+		sample.WgTxBytes = m.wgTxBytes
+		sample.WgRxBytes = m.wgRxBytes
+		if m.lastHandshake > 0 {
+			sample.HandshakeAgeSec = int64(time.Since(time.Unix(m.lastHandshake, 0)).Seconds())
+		} else {
+			sample.HandshakeAgeSec = -1
+		}
+		sample.HandshakeStalePct = handshakeStalenessFromAge(sample.HandshakeAgeSec)
+		sample.LossPct = sample.HandshakeStalePct
 	}
 	if !m.since.IsZero() {
 		sample.Since = m.since.Unix()
 	}
 	return sample
+}
+
+// handshakeStalenessFromAge converts WireGuard handshake age into a 0..100
+// connectivity risk score. With keepalive_interval=10s, a fresh handshake
+// (<15s) means the tunnel is healthy. As staleness grows the tunnel is
+// increasingly suspicious; beyond the reconnect threshold (90s) it is treated
+// as dead. age == -1 means no handshake has ever completed.
+func handshakeStalenessFromAge(ageSec int64) float64 {
+	if ageSec < 0 {
+		return 100
+	}
+	switch {
+	case ageSec <= 15:
+		return 0
+	case ageSec <= 60:
+		return float64(ageSec-15) / 45.0 * 50 // 0 -> 50 over 15..60s
+	case ageSec < 90:
+		return 50 + float64(ageSec-60)/30.0*50 // 50 -> 100 over 60..90s
+	default:
+		return 100
+	}
 }

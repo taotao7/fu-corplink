@@ -85,3 +85,59 @@ body {
 .pulse-dot {
   animation: ping-soft 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;
 }
+
+/* ---- traffic flow: signal pulses marching along a circuit trace ----
+   The dash pattern is drawn in SVG user units. Animating stroke-dashoffset
+   shifts the dashes along the path; sign controls direction. Duration is set
+   inline per element from the live throughput tier. */
+@keyframes flow-fwd {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+@keyframes flow-rev {
+  to {
+    stroke-dashoffset: 20;
+  }
+}
+.flow-fwd {
+  animation-name: flow-fwd;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+.flow-rev {
+  animation-name: flow-rev;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+/* a bright packet pulse sliding along the trace via CSS motion path.
+   offset-distance goes 0% -> 100%; animation-direction: reverse flips it.
+   Duration / delay / direction are set inline per packet. */
+@keyframes packet-travel {
+  from {
+    offset-distance: 0%;
+  }
+  to {
+    offset-distance: 100%;
+  }
+}
+.packet {
+  animation-name: packet-travel;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+/* slow blink for the "establishing handshake" state */
+@keyframes blink-soft {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+.blink-soft {
+  animation: blink-soft 1.4s ease-in-out infinite;
+}

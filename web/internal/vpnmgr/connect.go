@@ -114,6 +114,8 @@ func (m *Manager) connectReal(ctx context.Context, otp string) error {
 	m.curName = node.EnName
 	m.curAddress = wgConf.Address
 	m.lastRx, m.lastTx = 0, 0
+	m.lastHandshake = 0
+	m.wgTxBytes, m.wgRxBytes = 0, 0
 	m.lastSampleTime = time.Now()
 	m.state = StateConnected
 	m.lastErr = ""
@@ -162,6 +164,8 @@ func (m *Manager) teardown() {
 	m.cancelLoops = nil
 	m.since = time.Time{}
 	m.txBps, m.rxBps = 0, 0
+	m.lastHandshake = 0
+	m.wgTxBytes, m.wgRxBytes = 0, 0
 	m.mu.Unlock()
 
 	if cancel != nil {
@@ -204,6 +208,13 @@ func (m *Manager) sampleOnce() {
 	}
 	m.lastRx, m.lastTx = rx, tx
 	m.lastSampleTime = now
+
+	// refresh cached WireGuard peer stats so Traffic() never blocks on the
+	// wg-go UAPI. Reads are cheap (one IpcGet per second).
+	ps := m.device.PeerStats()
+	m.lastHandshake = ps.LastHandshakeSec
+	m.wgTxBytes = ps.TxBytes
+	m.wgRxBytes = ps.RxBytes
 }
 
 // runHandshakeWatch reconnects the tunnel if the WireGuard handshake goes stale.

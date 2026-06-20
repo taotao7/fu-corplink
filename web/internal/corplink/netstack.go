@@ -222,21 +222,46 @@ func (n *NetstackDevice) Close() {
 	}
 }
 
-// LastHandshake returns the most recent handshake unix time across peers, or 0.
-func (n *NetstackDevice) LastHandshake() int64 {
+// PeerStats is a snapshot of the WireGuard peer's wire-level counters and last
+// handshake time. WireGuard does not expose per-packet loss counters (data
+// packets are UDP fire-and-forget; only handshakes are retransmitted), so true
+// packet-loss % is not directly measurable. The VPNGateway derives a
+// handshake-staleness proxy from these fields instead.
+type PeerStats struct {
+	LastHandshakeSec int64
+	TxBytes          int64 // encrypted bytes sent to peer (wire-level)
+	RxBytes          int64 // encrypted bytes received from peer (wire-level)
+}
+
+// PeerStats reads the live peer counters from the WireGuard UAPI. With a single
+// peer configured (the corplink case) the tx_bytes/rx_bytes/last_handshake
+// fields belong to that peer; if IpcGet fails or no peer is present, zero
+// values are returned.
+func (n *NetstackDevice) PeerStats() PeerStats {
 	out, err := n.dev.IpcGet()
 	if err != nil {
-		return 0
+		return PeerStats{}
 	}
-	var last int64
+	var stats PeerStats
 	for _, line := range strings.Split(out, "\n") {
-		if v, ok := strings.CutPrefix(line, "last_handshake_time_sec="); ok {
-			if ts, err := parseInt64(v); err == nil && ts > last {
-				last = ts
+		switch {
+		case strings.HasPrefix(line, "tx_bytes="):
+			stats.TxBytes, _ = parseInt64(strings.TrimPrefix(line, "tx_bytes="))
+		case strings.HasPrefix(line, "rx_bytes="):
+			stats.RxBytes, _ = parseInt64(strings.TrimPrefix(line, "rx_bytes="))
+		case strings.HasPrefix(line, "last_handshake_time_sec="):
+			sec, _ := parseInt64(strings.TrimPrefix(line, "last_handshake_time_sec="))
+			if sec > stats.LastHandshakeSec {
+				stats.LastHandshakeSec = sec
 			}
 		}
 	}
-	return last
+	return stats
+}
+
+// LastHandshake returns the most recent handshake unix time across peers, or 0.
+func (n *NetstackDevice) LastHandshake() int64 {
+	return n.PeerStats().LastHandshakeSec
 }
 
 func parseInt64(s string) (int64, error) {
