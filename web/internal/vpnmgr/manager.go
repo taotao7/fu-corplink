@@ -20,7 +20,10 @@ const (
 	StateDisconnecting ConnState = "disconnecting"
 )
 
-const handshakeStaleAfter = 90 * time.Second
+// WireGuard initiators normally rekey after 120s and retry for roughly another
+// 90s before giving up. Treating a 90s-old latest-handshake as dead interrupts
+// healthy idle tunnels before WireGuard's own rekey window has elapsed.
+const handshakeStaleAfter = 210 * time.Second
 const handshakeStaleAfterSec = int64(handshakeStaleAfter / time.Second)
 
 // Status is a snapshot of the manager's current state for the UI.
