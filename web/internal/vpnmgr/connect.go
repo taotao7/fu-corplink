@@ -124,6 +124,7 @@ func (m *Manager) connectReal(ctx context.Context, otp string) error {
 	m.mu.Unlock()
 
 	go m.runSampler(loopCtx)
+	go m.runReporter(loopCtx, wgConf)
 	go m.runHandshakeWatch(loopCtx, wgConf)
 	return nil
 }
@@ -217,15 +218,36 @@ func (m *Manager) sampleOnce() {
 	m.wgRxBytes = ps.RxBytes
 }
 
+// runReporter periodically refreshes the device connection status with the
+// selected node. Some CorpLink gateways expire node-side session state if the
+// mobile client stops reporting after the initial connect, even though the
+// WireGuard transport keepalive is still running.
+func (m *Manager) runReporter(ctx context.Context, wgConf *corplink.WgConf) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	mode := routeModeReport(m.conf.RouteModeOrDefault())
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := m.client.ReportDevice(ctx, wgConf.Address, mode, false); err != nil {
+				log.Printf("wireguard report failed: %v", err)
+			}
+		}
+	}
+}
+
 // runHandshakeWatch reconnects the tunnel if the WireGuard handshake goes stale.
 // In TCP-bind mode the peer can drop an idle connection within a few minutes,
 // after which all in-tunnel traffic (including DNS) silently fails while the UI
-// still shows "connected". We poll the last-handshake time and, once it exceeds
-// the timeout, transparently re-establish the tunnel so the connection self-heals
-// instead of stranding the user until they reconnect by hand.
+// still shows "connected". We only force a reconnect after WireGuard's own rekey
+// and retry window has elapsed; a latest-handshake timestamp older than 90s is
+// normal for an idle tunnel and must not be treated as a disconnect.
 func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf) {
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
+	startedAt := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
@@ -239,6 +261,10 @@ func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf
 			}
 			last := dev.LastHandshake()
 			if last == 0 {
+				if time.Since(startedAt) > handshakeStaleAfter {
+					go m.reconnect()
+					return
+				}
 				continue
 			}
 			if time.Since(time.Unix(last, 0)) > handshakeStaleAfter {
