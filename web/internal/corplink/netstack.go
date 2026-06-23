@@ -35,6 +35,15 @@ type NetstackDevice struct {
 // and returns a running device. The tunnel addresses, MTU and DNS come from the
 // WgConf; peers/keys/routes are programmed via the wg-go UAPI.
 func StartNetstack(conf *WgConf) (*NetstackDevice, error) {
+	return StartNetstackWithProxy(conf, nil)
+}
+
+// StartNetstackWithProxy is like StartNetstack but routes the WireGuard TCP
+// transport (force_protocol=tcp) through the given upstream proxy so the WG
+// tunnel itself isn't captured by a host-layer TUN VPN. A nil proxy keeps the
+// default direct transport. UDP transport is not yet proxied; callers relying on
+// coexistence with a TUN VPN should use force_protocol=tcp.
+func StartNetstackWithProxy(conf *WgConf, proxy *UpstreamProxyConfig) (*NetstackDevice, error) {
 	localAddrs, err := parseAddrs(conf)
 	if err != nil {
 		return nil, err
@@ -51,7 +60,7 @@ func StartNetstack(conf *WgConf) (*NetstackDevice, error) {
 		return nil, fmt.Errorf("create netstack tun: %w", err)
 	}
 
-	bind, err := newWireGuardBind(conf.Protocol)
+	bind, err := newWireGuardBind(conf.Protocol, proxy)
 	if err != nil {
 		_ = tunDev.Close()
 		return nil, err
@@ -75,14 +84,30 @@ func StartNetstack(conf *WgConf) (*NetstackDevice, error) {
 	return &NetstackDevice{tun: tnet, dev: dev, dns: dnsAddrs, has6: hasIPv6(localAddrs)}, nil
 }
 
-func newWireGuardBind(protocol int) (conn.Bind, error) {
+func newWireGuardBind(protocol int, proxy *UpstreamProxyConfig) (conn.Bind, error) {
 	switch protocol {
 	case 0:
 		return conn.NewDefaultBind(), nil
 	case 1:
-		return conn.NewTCPBind(), nil
+		bind, ok := conn.NewTCPBind().(*conn.TcpBind)
+		if !ok {
+			return nil, fmt.Errorf("expected *conn.TcpBind")
+		}
+		if proxy != nil && proxy.Enabled() {
+			bind.SetDialer(proxyDialer(proxy))
+		}
+		return bind, nil
 	default:
 		return nil, fmt.Errorf("unsupported wireguard protocol %d", protocol)
+	}
+}
+
+// proxyDialer returns a tcpDialer-compatible func that connects to addr through
+// the upstream proxy. It lives here (in the corplink package) to keep the
+// wireguard-go vendored package free of corplink-specific deps.
+func proxyDialer(proxy *UpstreamProxyConfig) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return proxy.DialContext(ctx, network, addr)
 	}
 }
 

@@ -66,7 +66,42 @@ func NewClient(conf *Config) (*Client, error) {
 	if conf.Server != "" {
 		c.seedDeviceCookies()
 	}
+	c.applyUpstreamProxy()
 	return c, nil
+}
+
+// applyUpstreamProxy reconfigures the HTTP transport to route API calls through
+// the configured upstream proxy (or directly when none is set). No-op safe to
+// call repeatedly; invoked at construction and whenever the config changes.
+func (c *Client) applyUpstreamProxy() {
+	proxyURL := c.conf.upstreamProxy.ProxyURL()
+	tr, ok := c.hc.Transport.(*http.Transport)
+	if !ok {
+		return
+	}
+	if proxyURL == nil {
+		tr.Proxy = nil
+		return
+	}
+	tr.Proxy = http.ProxyURL(proxyURL)
+}
+
+// SetUpstreamProxy parses raw and applies it to the HTTP transport. An empty
+// raw clears any previously configured proxy. The parsed config is stored on
+// the shared config so the WireGuard transport picks it up on connect.
+func (c *Client) SetUpstreamProxy(raw string) error {
+	cfg, err := ParseUpstreamProxy(raw)
+	if err != nil {
+		return err
+	}
+	c.conf.upstreamProxy = cfg
+	c.applyUpstreamProxy()
+	return nil
+}
+
+// UpstreamProxy returns the active upstream proxy config (may be nil).
+func (c *Client) UpstreamProxy() *UpstreamProxyConfig {
+	return c.conf.upstreamProxy
 }
 
 // SetServer sets (or changes) the company server base url and seeds the device
@@ -197,12 +232,23 @@ func (c *Client) parseTimeOffset(resp *http.Response) {
 
 // GetCompany resolves a company code to its server domain (and zh/en names).
 func GetCompany(ctx context.Context, code string) (*respCompany, error) {
-	hc := &http.Client{
-		Timeout: 15 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		},
+	return GetCompanyWithProxy(ctx, code, nil)
+}
+
+// GetCompanyWithProxy is like GetCompany but routes the dispatch lookup through
+// the given upstream proxy. Needed because the dispatch endpoint resolves to a
+// TUN VPN's fake-ip when one is active, and the raw request would otherwise be
+// captured by its default route.
+func GetCompanyWithProxy(ctx context.Context, code string, proxy *UpstreamProxyConfig) (*respCompany, error) {
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 	}
+	if proxy != nil && proxy.Enabled() {
+		if u := proxy.ProxyURL(); u != nil {
+			tr.Proxy = http.ProxyURL(u)
+		}
+	}
+	hc := &http.Client{Timeout: 15 * time.Second, Transport: tr}
 	buf, _ := json.Marshal(map[string]any{"code": code})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, URLGetCompany, bytes.NewReader(buf))
 	if err != nil {

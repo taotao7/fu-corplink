@@ -84,7 +84,7 @@ func (m *Manager) connectReal(ctx context.Context, otp string) error {
 		wgConf.DNS,
 	)
 
-	device, err := corplink.StartNetstack(wgConf)
+	device, err := corplink.StartNetstackWithProxy(wgConf, m.client.UpstreamProxy())
 	if err != nil {
 		return err
 	}

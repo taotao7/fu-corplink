@@ -19,7 +19,7 @@ type CompanyInfo struct {
 // SetCompany resolves a company code to its server and persists it, seeding the
 // client for subsequent login calls.
 func (m *Manager) SetCompany(ctx context.Context, code string) (*CompanyInfo, error) {
-	info, err := corplink.GetCompany(ctx, code)
+	info, err := corplink.GetCompanyWithProxy(ctx, code, m.client.UpstreamProxy())
 	if err != nil {
 		return nil, err
 	}
@@ -49,6 +49,7 @@ type ConfigView struct {
 	VPNSelectStrategy string `json:"vpn_select_strategy"`
 	RouteMode         string `json:"route_mode"`
 	ForceProtocol     string `json:"force_protocol"`
+	UpstreamProxy     string `json:"upstream_proxy"`
 	CompanyName       string `json:"company_name"`
 	Username          string `json:"username"`
 }
@@ -63,6 +64,7 @@ func (m *Manager) ConfigView() ConfigView {
 		VPNSelectStrategy: m.conf.VPNSelectStrategy,
 		RouteMode:         m.conf.RouteModeOrDefault(),
 		ForceProtocol:     m.conf.ForceProtocol,
+		UpstreamProxy:     m.conf.UpstreamProxy,
 		CompanyName:       m.conf.CompanyName,
 		Username:          m.conf.Username,
 	}
@@ -75,10 +77,11 @@ type ConfigUpdate struct {
 	VPNSelectStrategy *string `json:"vpn_select_strategy"`
 	RouteMode         *string `json:"route_mode"`
 	ForceProtocol     *string `json:"force_protocol"`
+	UpstreamProxy     *string `json:"upstream_proxy"`
 }
 
 // UpdateConfig applies a partial config update and persists it. Changes to the
-// proxy listen address take effect on the next connect.
+// proxy listen address and upstream proxy take effect on the next connect.
 func (m *Manager) UpdateConfig(u ConfigUpdate) error {
 	m.mu.Lock()
 	if u.SocksListen != nil && *u.SocksListen != "" {
@@ -106,6 +109,18 @@ func (m *Manager) UpdateConfig(u ConfigUpdate) error {
 			m.conf.ForceProtocol = forceProtocol
 		}
 	}
+	if u.UpstreamProxy != nil {
+		m.conf.UpstreamProxy = strings.TrimSpace(*u.UpstreamProxy)
+	}
 	m.mu.Unlock()
+
+	// Re-parse and apply the upstream proxy to the live client so API calls
+	// route correctly even before the next connect. A malformed value is
+	// rejected here so the caller surfaces the error.
+	if u.UpstreamProxy != nil {
+		if err := m.client.SetUpstreamProxy(m.conf.UpstreamProxy); err != nil {
+			return err
+		}
+	}
 	return m.conf.Save()
 }

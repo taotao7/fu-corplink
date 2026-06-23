@@ -70,7 +70,11 @@ func (t *TcpBind) SetMark(mark uint32) error {
 	}
 	var err error
 	t.tcpConnMap.Range(func(_ string, v *tcpConnState) bool {
-		fd, e := v.conn.SyscallConn()
+		sc, ok := v.conn.(syscallConn)
+		if !ok {
+			return true // proxied connections can't take an fwmark
+		}
+		fd, e := sc.SyscallConn()
 		if e != nil {
 			err = e
 			return false

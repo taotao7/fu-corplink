@@ -20,11 +20,11 @@ const (
 
 // Login platforms understood by the upstream corplink/feilian backend.
 const (
-	PlatformLDAP        = "ldap"
-	PlatformCorplink    = "feilian"
-	PlatformCorplinkV1  = "feilian_v1"
-	PlatformOIDC        = "OIDC"
-	PlatformLark        = "lark"
+	PlatformLDAP       = "ldap"
+	PlatformCorplink   = "feilian"
+	PlatformCorplinkV1 = "feilian_v1"
+	PlatformOIDC       = "OIDC"
+	PlatformLark       = "lark"
 )
 
 // VPN node selection strategies.
@@ -76,6 +76,15 @@ type Config struct {
 	ProxyUsername    string `json:"proxy_username,omitempty"`
 	ProxyPassword    string `json:"proxy_password,omitempty"`
 
+	// UpstreamProxy routes ALL of fu-corplink's own egress — the corplink API
+	// calls, DNS resolution and the WireGuard transport (UDP via SOCKS5 UDP
+	// ASSOCIATE, TCP via CONNECT) — through an upstream HTTP/SOCKS5 proxy. This
+	// lets fu-corplink coexist with a host-layer TUN VPN (e.g. Stash/Clash) that
+	// otherwise captures fu-corplink's outbound packets on the default route.
+	// When set, point it at the TUN VPN's local mixed-port (e.g. the host's
+	// http://<gateway>:7890). Empty disables routing (default behavior).
+	UpstreamProxy string `json:"upstream_proxy,omitempty"`
+
 	// admin (control plane auth gate)
 	AdminAuthEnabled bool   `json:"admin_auth_enabled,omitempty"`
 	AdminUsername    string `json:"admin_username,omitempty"`
@@ -85,8 +94,9 @@ type Config struct {
 	StrictMode bool `json:"strict_mode,omitempty"`
 
 	// runtime-only, never serialized
-	path string
-	mu   sync.Mutex
+	upstreamProxy *UpstreamProxyConfig
+	path          string
+	mu            sync.Mutex
 }
 
 // LoadConfig reads the config from file, applying defaults and persisting back
@@ -112,6 +122,13 @@ func LoadConfig(path string) (*Config, error) {
 	if changed {
 		if err := c.Save(); err != nil {
 			return nil, err
+		}
+	}
+	// Parse the upstream proxy once at load. Failures here are non-fatal: a
+	// malformed proxy URL is logged-and-ignored rather than preventing startup.
+	if c.UpstreamProxy != "" {
+		if up, perr := ParseUpstreamProxy(c.UpstreamProxy); perr == nil {
+			c.upstreamProxy = up
 		}
 	}
 	return c, nil
@@ -202,6 +219,11 @@ func (c *Config) Save() error {
 
 // Path returns the config file path.
 func (c *Config) Path() string { return c.path }
+
+// UpstreamProxyConfig returns the parsed upstream proxy (may be nil). It is the
+// authoritative source for WG transport routing; Client.SetUpstreamProxy keeps
+// it in sync with config changes.
+func (c *Config) UpstreamProxyConfig() *UpstreamProxyConfig { return c.upstreamProxy }
 
 // CookieFile returns the sibling cookie jar path used to persist the session.
 func (c *Config) CookieFile() string {

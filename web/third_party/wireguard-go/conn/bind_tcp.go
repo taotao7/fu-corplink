@@ -1,11 +1,13 @@
 package conn
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/netip"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.zx2c4.com/wireguard/common"
@@ -20,8 +22,21 @@ const MaxSegmentSize = 65535
 
 const tcpReceiveQueueSize = 1024
 
+// tcpDialer dials a TCP connection to the peer endpoint. Defaults to a direct
+// net.DialTCP; replaced with an upstream-proxy dialer when fu-corplink routes
+// its transport through a proxy (so the WG TCP tunnel avoids the host's TUN).
+type tcpDialer func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// syscallConn is implemented by raw socket-backed connections (*net.TCPConn,
+// *net.UDPConn) so fwmark/sockopt control works when present, and is skipped
+// for proxied wrappers that have no underlying fd.
+type syscallConn interface {
+	SyscallConn() (syscall.RawConn, error)
+}
+
 func NewTCPBind() Bind {
 	return &TcpBind{
+		dial: directTCPDial,
 		dataPool: sync.Pool{
 			New: func() any {
 				data := &recvData{
@@ -33,10 +48,20 @@ func NewTCPBind() Bind {
 	}
 }
 
+// directTCPDial is the default transport dialer (no proxy).
+func directTCPDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	var d net.Dialer
+	return d.DialContext(ctx, network, addr)
+}
+
 type TcpBind struct {
 	connMu     sync.Mutex
 	tcpConnMap common.SyncMap[string, *tcpConnState]
 	listener   *net.TCPListener
+
+	// dial overrides how outbound TCP connections to peers are established.
+	// When nil, connections are dialed directly via net.DialTCP.
+	dial tcpDialer
 
 	dataPool  sync.Pool
 	recvChan  chan *recvData
@@ -44,7 +69,7 @@ type TcpBind struct {
 }
 
 type tcpConnState struct {
-	conn    *net.TCPConn
+	conn    net.Conn
 	writeMu sync.Mutex
 }
 
@@ -158,23 +183,53 @@ func (t *TcpBind) deleteConn(endpoint Endpoint, state *tcpConnState) {
 	}
 }
 
-func tuneTCPConn(conn *net.TCPConn) {
-	_ = conn.SetNoDelay(true)
-	// Aggressive keepalive so a silently-dropped peer connection (e.g. an NAT
-	// idle-timeout on the upstream gateway) is detected within ~25s. The
-	// default Linux probe schedule (idle + 9*75s) takes ~11min to declare the
-	// socket dead — far past WireGuard's RejectAfterTime (180s), after which the
-	// whole session is void and the tunnel goes dark. Idle 10s + 5s*3 probes
-	// reclaims the dead conn well before that, so getConn redials a fresh TCP
-	// connection and the rekey handshake lands on a live socket.
-	_ = conn.SetKeepAliveConfig(net.KeepAliveConfig{
-		Enable:   true,
-		Idle:     10 * time.Second,
-		Interval: 5 * time.Second,
-		Count:    3,
-	})
-	_ = conn.SetReadBuffer(4 << 20)
-	_ = conn.SetWriteBuffer(4 << 20)
+// tuneTCPConn applies low-latency/aggressive-keepalive tuning to a connection.
+// Real *net.TCPConns get the full treatment; proxied wrappers get whatever the
+// socket layer allows.
+func tuneTCPConn(conn net.Conn) {
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+		// Aggressive keepalive so a silently-dropped peer connection (e.g. an NAT
+		// idle-timeout on the upstream gateway) is detected within ~25s. The
+		// default Linux probe schedule (idle + 9*75s) takes ~11min to declare the
+		// socket dead — far past WireGuard's RejectAfterTime (180s), after which
+		// the whole session is void and the tunnel goes dark. Idle 10s + 5s*3
+		// probes reclaims the dead conn well before that, so getConn redials a
+		// fresh TCP connection and the rekey handshake lands on a live socket.
+		_ = tc.SetKeepAliveConfig(net.KeepAliveConfig{
+			Enable:   true,
+			Idle:     10 * time.Second,
+			Interval: 5 * time.Second,
+			Count:    3,
+		})
+		_ = tc.SetReadBuffer(4 << 20)
+		_ = tc.SetWriteBuffer(4 << 20)
+		return
+	}
+	// best-effort for proxied connections
+	type noDelayer interface{ SetNoDelay(bool) error }
+	if c, ok := conn.(noDelayer); ok {
+		_ = c.SetNoDelay(true)
+	}
+	type keepAliveSetter interface {
+		SetKeepAliveConfig(net.KeepAliveConfig) error
+	}
+	if c, ok := conn.(keepAliveSetter); ok {
+		_ = c.SetKeepAliveConfig(net.KeepAliveConfig{
+			Enable:   true,
+			Idle:     10 * time.Second,
+			Interval: 5 * time.Second,
+			Count:    3,
+		})
+	}
+	type readBufferSetter interface{ SetReadBuffer(int) error }
+	if c, ok := conn.(readBufferSetter); ok {
+		_ = c.SetReadBuffer(4 << 20)
+	}
+	type writeBufferSetter interface{ SetWriteBuffer(int) error }
+	if c, ok := conn.(writeBufferSetter); ok {
+		_ = c.SetWriteBuffer(4 << 20)
+	}
 }
 
 func (t *TcpBind) accept() {
@@ -250,12 +305,16 @@ func (t *TcpBind) getConn(endpoint Endpoint) (*tcpConnState, error) {
 		IP:   ip,
 		Port: int(endpoint.(*StdNetEndpoint).Port()),
 	}
-	conn, err := net.DialTCP("tcp", nil, addr)
+	dial := t.dial
+	if dial == nil {
+		dial = directTCPDial
+	}
+	nc, err := dial(context.Background(), "tcp", addr.String())
 	if err != nil {
 		return nil, err
 	}
-	tuneTCPConn(conn)
-	state = &tcpConnState{conn: conn}
+	tuneTCPConn(nc)
+	state = &tcpConnState{conn: nc}
 	t.tcpConnMap.Store(key, state)
 	t.handleConn(state, endpoint)
 	return state, nil
@@ -297,6 +356,18 @@ func (t *TcpBind) ParseEndpoint(s string) (Endpoint, error) {
 	return &StdNetEndpoint{
 		AddrPort: e,
 	}, nil
+}
+
+// SetDialer overrides how outbound TCP connections to peers are dialed. Pass nil
+// to restore direct dialing. Used by fu-corplink to route the WireGuard TCP
+// transport through an upstream HTTP/SOCKS5 proxy so it isn't captured by a
+// host-layer TUN VPN. Must be called before Open.
+func (t *TcpBind) SetDialer(d tcpDialer) {
+	if d == nil {
+		t.dial = directTCPDial
+		return
+	}
+	t.dial = d
 }
 
 func (t *TcpBind) BatchSize() int {

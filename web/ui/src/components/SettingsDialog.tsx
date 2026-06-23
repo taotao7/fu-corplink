@@ -27,6 +27,7 @@ export function SettingsDialog({
         vpn_select_strategy: cfg.vpn_select_strategy,
         route_mode: cfg.route_mode,
         force_protocol: cfg.force_protocol,
+        upstream_proxy: cfg.upstream_proxy,
       });
       onClose();
     } finally {
@@ -71,7 +72,19 @@ export function SettingsDialog({
               { value: "tcp", label: "强制 TCP" },
             ]}
           />
-          <p className="text-xs text-ink-faint">代理地址改动会在下次连接时生效。</p>
+          <Input
+            label="上游代理 (upstream_proxy)"
+            value={cfg.upstream_proxy ?? ""}
+            onChange={(e) =>
+              setCfg({ ...cfg, upstream_proxy: e.target.value })
+            }
+            placeholder="留空禁用；如 http://host.docker.internal:7890"
+          />
+          <p className="text-xs text-ink-faint">
+            与系统级 TUN VPN（如 Stash/Clash）共存时，把 fu-corplink
+            的全部出站流量走它的混合代理端口；UDP 不支持代理，此时请把 WireGuard
+            协议设为「强制 TCP」。上游代理改动会在下次连接时生效。
+          </p>
           <div className="flex justify-end gap-2">
             <Button variant="secondary" onClick={onClose}>
               取消

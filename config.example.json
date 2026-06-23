@@ -12,5 +12,8 @@
   "admin_password": "",
   "proxy_auth_enabled": false,
   "proxy_username": "",
-  "proxy_password": ""
+  "proxy_password": "",
+
+  "_comment2": "与系统级 TUN VPN（Stash/Clash 等）共存时，把 fu-corplink 的出站流量走它的混合代理端口；此时 WireGuard 协议建议设为 tcp（UDP 无法走 HTTP 代理）。例如 Docker 里指向宿主机的 Stash：http://host.docker.internal:7890",
+  "upstream_proxy": ""
 }

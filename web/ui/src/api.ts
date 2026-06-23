@@ -77,6 +77,7 @@ export interface ConfigView {
   vpn_select_strategy: string;
   route_mode: string;
   force_protocol: string;
+  upstream_proxy: string;
   company_name: string;
   username: string;
 }

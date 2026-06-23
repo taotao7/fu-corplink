@@ -132,6 +132,7 @@ corplink-web --listen 127.0.0.1:6151 ./config.json
 | `vpn_select_strategy` | `default` | `default` 为首个探测可达节点，`latency` 为最低延迟节点 |
 | `route_mode` | `full` | `full` 使用服务端全局路由，`split` 使用服务端分流路由 |
 | `force_protocol` | 空 | 空值按节点 `protocol_mode` 自动选择，也可设为 `udp` / `tcp` |
+| `upstream_proxy` | 空 | 把 fu-corplink 的所有出站（飞连 API、WireGuard 传输）走一个上游 HTTP/SOCKS5 代理，用于和系统级 TUN VPN 共存（见下） |
 | `proxy_auth_enabled` | `false` | 是否要求代理鉴权 |
 | `proxy_username` / `proxy_password` | 空 | SOCKS5 用户名密码和 HTTP `Proxy-Authorization` Basic 凭据 |
 | `admin_auth_enabled` | `false` | 是否启用 Web 控制台鉴权 |
@@ -172,10 +173,26 @@ corplink-web --listen 127.0.0.1:6151 ./config.json
 - 代理默认监听 `0.0.0.0:8989` 且不鉴权。对局域网或公网开放前，请启用 `proxy_auth_enabled` 或限制监听地址。
 - 配置目录包含 device_id、WireGuard private key、登录会话 cookie 和可能的用户名密码；请按敏感数据处理。
 
+## 与系统级 TUN VPN 共存（Stash / Clash / Surge 等）
+
+fu-corplink 用用户态 WireGuard，自身不建 TUN、不动系统路由表。但当**系统级 TUN VPN**（如 Stash、Clash、Surge 的 TUN/Enhanced Mode）开启时，它会用 `0.0.0.0/1` + `128.0.0.0/1` 这种比默认路由更具体的路由把**整机出站**（包括 fu-corplink 自己的飞连 API 请求和 WireGuard 传输）都收进 TUN，于是 fu-corplink 的握手会被 TUN VPN 的规则左右，时而失效；反过来 fu-corplink 的流量也可能干扰 TUN VPN。表现为“开了 corplink 后 git/内网走不通，关了又好”，或“访问内网时 corplink 失效但其它正常”。
+
+解决方法是把 fu-corplink 的出站交给那个 TUN VPN 的**混合代理端口**（它对代理客户端的流量会按规则走真实接口，而不进自己的 TUN 抓取）：
+
+1. 在 TUN VPN 客户端里确认它的 HTTP/SOCKS5 混合端口（Stash 默认 `7890`，监听 `0.0.0.0` 或局域网可达）。
+2. 在 fu-corplink 的“设置 → 上游代理 (upstream_proxy)”里填该地址：
+   - 本机直跑：`http://127.0.0.1:7890`
+   - Docker 里跑（容器要访问宿主机）：`http://host.docker.internal:7890`
+   - 也可写 `socks5://...`。
+3. 把“WireGuard 协议”设为**强制 TCP**（UDP 没法走 HTTP 代理；SOCKS5 UDP ASSOCIATE 多数消费级客户端不支持）。
+
+设置后 fu-corplink 的飞连 API 调用、节点探测、WireGuard 隧道都从该代理出去，与 TUN VPN 互不抢占，stash 的 TUN 功能完整保留。留空则恢复直连（默认）。
+
 ## 已知限制
 
 - 飞连上游接口可能变化，兼容性不保证长期稳定。
 - SOCKS5 UDP 和 BIND 未实现；当前混合代理只处理 TCP 场景。
+- `upstream_proxy` 走 HTTP 代理时只支持 TCP 传输（WireGuard 协议需设为 `tcp`）；UDP 传输不被代理。
 - Windows 未做端到端验证。
 - `full` / `split` 都依赖飞连服务端返回的路由；如果服务端没有返回全局路由，程序会拒绝盲目回退到 `0.0.0.0/0`，避免 peer IP 路由环。
 

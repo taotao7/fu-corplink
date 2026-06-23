@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1
+# (the syntax line is optional; comment it out if your builder can't fetch the
+# external frontend, e.g. behind a TUN VPN that intercepts registry pulls)
 
 # ---- frontend build ----
 # Keep the same layout as the repo (web/ui beside web/internal) so vite's
