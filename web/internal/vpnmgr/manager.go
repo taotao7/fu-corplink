@@ -26,6 +26,15 @@ const (
 const handshakeStaleAfter = 210 * time.Second
 const handshakeStaleAfterSec = int64(handshakeStaleAfter / time.Second)
 
+// rxStallAfter is how long outbound traffic may keep flowing with zero inbound
+// bytes before we declare the tunnel "fake-alive". CorpLink gateways sometimes
+// keep answering WireGuard handshakes long after they have started silently
+// dropping every data packet (session revoked / device invalidated server-side),
+// so a fresh handshake timestamp is NOT proof of a working tunnel. We only fire
+// while we actually have outbound demand (wgTxBytes growing); an idle tunnel
+// with nothing to send is allowed to receive nothing.
+const rxStallAfter = 60 * time.Second
+
 // Status is a snapshot of the manager's current state for the UI.
 type Status struct {
 	State         ConnState `json:"state"`
@@ -102,6 +111,13 @@ type Manager struct {
 	lastHandshake int64
 	wgTxBytes     int64
 	wgRxBytes     int64
+
+	// rx-stall tracking for the handshake watchdog. We record the last rxBytes
+	// value we observed and the time it last changed; a tunnel that keeps
+	// transmitting but receives nothing for rxStallAfter is fake-alive and gets
+	// reconnected even though its handshake timestamp looks fresh.
+	lastRxBytes  int64
+	rxChangedAt  time.Time
 
 	serverCache []Server
 	cacheMu     sync.Mutex

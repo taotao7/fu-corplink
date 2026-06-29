@@ -3,6 +3,7 @@ package conn
 import (
 	"context"
 	"io"
+	"log"
 	"net"
 	"net/netip"
 	"runtime"
@@ -136,27 +137,39 @@ func (t *TcpBind) handleConn(state *tcpConnState, endpoint Endpoint) {
 	go func() {
 		conn := state.conn
 		tuneTCPConn(conn)
+		var readErr error
 		defer func() {
 			t.deleteConn(endpoint, state)
 			_ = conn.Close()
+			// Don't log on an orderly shutdown of the whole bind; only surface
+			// mid-life drops of the peer connection, which are the interesting
+			// events when debugging a tunnel going dark.
+			select {
+			case <-t.closeChan:
+			default:
+				log.Printf("tcp-bind: transport conn to %s closed: %v", endpoint.DstToString(), readErr)
+			}
 		}()
 		for {
 			data := t.dataPool.Get().(*recvData)
 			// read uint32 size header
 			_, err := io.ReadFull(conn, data.len[:])
 			if err != nil {
+				readErr = err
 				t.dataPool.Put(data)
 				return
 			}
 			l := reqLen(data.len)
 			size := l.Len()
 			if size <= 0 || size > MaxSegmentSize {
+				readErr = io.ErrUnexpectedEOF
 				t.dataPool.Put(data)
 				return
 			}
 			// read real data
 			n, err := io.ReadFull(conn, data.buff[:size])
 			if err != nil {
+				readErr = err
 				t.dataPool.Put(data)
 				return
 			}
@@ -316,6 +329,7 @@ func (t *TcpBind) getConn(endpoint Endpoint) (*tcpConnState, error) {
 	tuneTCPConn(nc)
 	state = &tcpConnState{conn: nc}
 	t.tcpConnMap.Store(key, state)
+	log.Printf("tcp-bind: dialed new transport conn to %s", key)
 	t.handleConn(state, endpoint)
 	return state, nil
 }

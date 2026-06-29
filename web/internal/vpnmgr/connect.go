@@ -215,6 +215,12 @@ func (m *Manager) sampleOnce() {
 	ps := m.device.PeerStats()
 	m.lastHandshake = ps.LastHandshakeSec
 	m.wgTxBytes = ps.TxBytes
+	if ps.RxBytes != m.lastRxBytes {
+		// record the moment inbound bytes last advanced so the watchdog can spot
+		// a tunnel that transmits but never receives.
+		m.lastRxBytes = ps.RxBytes
+		m.rxChangedAt = now
+	}
 	m.wgRxBytes = ps.RxBytes
 }
 
@@ -238,16 +244,30 @@ func (m *Manager) runReporter(ctx context.Context, wgConf *corplink.WgConf) {
 	}
 }
 
-// runHandshakeWatch reconnects the tunnel if the WireGuard handshake goes stale.
-// In TCP-bind mode the peer can drop an idle connection within a few minutes,
-// after which all in-tunnel traffic (including DNS) silently fails while the UI
-// still shows "connected". We only force a reconnect after WireGuard's own rekey
-// and retry window has elapsed; a latest-handshake timestamp older than 90s is
-// normal for an idle tunnel and must not be treated as a disconnect.
+// runHandshakeWatch reconnects the tunnel when it detects the data path is dead.
+// It uses two complementary signals, because CorpLink gateways can keep the
+// WireGuard handshake alive while silently dropping every data packet:
+//
+//  1. Handshake stale: latest-handshake timestamp older than handshakeStaleAfter.
+//     Catches a peer that has stopped responding entirely (TCP conn dropped,
+//     gateway gone, NAT idle-timeout).
+//
+//  2. RX stall (fake-alive): we keep transmitting (wgTxBytes growing) but have
+//     received nothing (wgRxBytes flat) for longer than rxStallAfter. This is
+//     the signature of a gateway that answers handshakes yet drops data, which a
+//     handshake-only check can never see. An idle tunnel with no outbound demand
+//     is left alone.
+//
+// Stats come from runSampler's per-second PeerStats() cache, so this loop never
+// hits the wg-go UAPI itself.
 func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf) {
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
 	startedAt := time.Now()
+
+	// txBytes observed on the previous tick; we only treat an rx stall as real
+	// while outbound demand is present (i.e. we are actively sending).
+	var prevTxBytes int64
 	for {
 		select {
 		case <-ctx.Done():
@@ -255,26 +275,79 @@ func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf
 		case <-ticker.C:
 			m.mu.Lock()
 			dev := m.device
-			m.mu.Unlock()
 			if dev == nil {
+				m.mu.Unlock()
 				return
 			}
-			last := dev.LastHandshake()
-			if last == 0 {
-				if time.Since(startedAt) > handshakeStaleAfter {
-					go m.reconnect()
-					return
-				}
-				continue
-			}
-			if time.Since(time.Unix(last, 0)) > handshakeStaleAfter {
-				// reconnect runs the teardown that cancels this loop's ctx, so
-				// returning here lets the freshly-spawned watcher take over.
+			last := m.lastHandshake
+			txBytes := m.wgTxBytes
+			rxBytes := m.wgRxBytes
+			rxChangedAt := m.rxChangedAt
+			m.mu.Unlock()
+
+			now := time.Now()
+			txGrowing := txBytes > prevTxBytes
+			prevTxBytes = txBytes
+			log.Printf("handshake watch: last_handshake=%d tx=%d rx=%d rx_changed_ago=%s tx_growing=%t",
+				last, txBytes, rxBytes, ageString(rxChangedAt, now), txGrowing)
+
+			reason := reconnectReason(reconnectInputs{
+				lastHandshake: last,
+				startedAt:     startedAt,
+				txGrowing:     txGrowing,
+				rxChangedAt:   rxChangedAt,
+				now:           now,
+			})
+			if reason != "" {
+				log.Printf("reconnect: %s", reason)
 				go m.reconnect()
 				return
 			}
 		}
 	}
+}
+
+// reconnectInputs bundles the state a reconnect decision is made from.
+type reconnectInputs struct {
+	lastHandshake int64        // unix seconds, 0 if never
+	startedAt     time.Time    // tunnel start, for the never-handshaked grace window
+	txGrowing     bool         // outbound wgTxBytes advanced since the previous tick
+	rxChangedAt   time.Time    // last time inbound wgRxBytes advanced; zero if never
+	now           time.Time
+}
+
+// reconnectReason returns a non-empty reason string when the tunnel should be
+// torn down and re-established, or "" when it looks healthy. Extracted from the
+// watchdog loop so the decision is unit-testable.
+func reconnectReason(in reconnectInputs) string {
+	// Signal 1: handshake stale / never happened.
+	if in.lastHandshake == 0 {
+		if in.now.Sub(in.startedAt) > handshakeStaleAfter {
+			return fmt.Sprintf("no handshake within %s of tunnel start", handshakeStaleAfter)
+		}
+		return ""
+	}
+	handshakeAge := in.now.Sub(time.Unix(in.lastHandshake, 0))
+	if handshakeAge > handshakeStaleAfter {
+		return fmt.Sprintf("handshake stale (age %s > %s)", handshakeAge, handshakeStaleAfter)
+	}
+
+	// Signal 2: fake-alive. We're sending but receiving nothing for a while.
+	// Only fire while we actually have outbound demand so a truly idle tunnel
+	// isn't needlessly torn down.
+	if in.txGrowing && !in.rxChangedAt.IsZero() && in.now.Sub(in.rxChangedAt) > rxStallAfter {
+		return fmt.Sprintf("rx stall - tx growing but no rx for %s", in.now.Sub(in.rxChangedAt))
+	}
+	return ""
+}
+
+// ageString renders a duration-since in a compact form for log lines, tolerating
+// the zero value (never observed).
+func ageString(t, now time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	return now.Sub(t).Round(time.Second).String()
 }
 
 // reconnect tears down the current tunnel and re-establishes it in place,
