@@ -149,6 +149,7 @@ func httpConnect(ctx context.Context, proxyHost, user, pass, addr string) (net.C
 	if err != nil {
 		return nil, fmt.Errorf("connect to http proxy %s: %w", proxyHost, err)
 	}
+	applyKeepAlive(conn)
 	applyDeadline(conn, ctx, 15*time.Second)
 
 	var req strings.Builder
@@ -197,6 +198,7 @@ func socks5Connect(ctx context.Context, proxyHost, user, pass, addr string) (net
 	if err != nil {
 		return nil, fmt.Errorf("connect to socks5 proxy %s: %w", proxyHost, err)
 	}
+	applyKeepAlive(conn)
 	applyDeadline(conn, ctx, 15*time.Second)
 	if err := socks5Greet(conn, user); err != nil {
 		_ = conn.Close()
@@ -365,6 +367,33 @@ func (l *lineReader) ReadString(delim byte) (string, error) {
 			return out.String(), err
 		}
 	}
+}
+
+// applyKeepAlive enables aggressive TCP keepalive on the real socket underlying
+// an upstream-proxy connection. This is essential because the WireGuard TCP
+// transport dials through the host TUN VPN (Stash/Clash mixed-port); when that
+// proxy silently drops a node (e.g. on a node switch / rule reload) the TCP
+// connection is left half-open — no FIN, no RST, no error — yet data stops
+// flowing. The default kernel probe schedule (~11min on Linux) declares the
+// socket dead far past WireGuard's session lifetime, so the tunnel goes dark
+// for minutes and only recovers via the 210s handshake-stale fallback.
+//
+// Idle 10s + 5s*3 probes reclaims the dead connection in ~25s: the read loop in
+// TcpBind then fails, drops the conn, and the next Send redials a fresh one. We
+// set it on the raw *net.TCPConn here (before it gets wrapped in a leftoverConn)
+// because the bind's own tuner only matches *net.TCPConn and would otherwise
+// skip proxied connections.
+func applyKeepAlive(conn net.Conn) {
+	tc, ok := conn.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	_ = tc.SetKeepAliveConfig(net.KeepAliveConfig{
+		Enable:   true,
+		Idle:     10 * time.Second,
+		Interval: 5 * time.Second,
+		Count:    3,
+	})
 }
 
 // leftoverConn forwards any bytes already consumed during the handshake before
