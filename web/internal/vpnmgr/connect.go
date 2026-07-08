@@ -207,20 +207,24 @@ func (m *Manager) sampleOnce() {
 		m.rxBps = float64(rx-m.lastRx) / dt
 		m.txBps = float64(tx-m.lastTx) / dt
 	}
+	// Record when real (application-level) traffic last advanced, for the
+	// fake-alive watchdog. These countingConn totals exclude WireGuard keepalive,
+	// so an idle tunnel shows no outbound demand and is never falsely reconnected.
+	if tx > m.lastTx {
+		m.appTxAt = now
+	}
+	if rx > m.lastRx {
+		m.appRxAt = now
+	}
 	m.lastRx, m.lastTx = rx, tx
 	m.lastSampleTime = now
 
 	// refresh cached WireGuard peer stats so Traffic() never blocks on the
-	// wg-go UAPI. Reads are cheap (one IpcGet per second).
+	// wg-go UAPI. Reads are cheap (one IpcGet per second). These wire-level
+	// counters are for the UI only; the watchdog uses the app-level times above.
 	ps := m.device.PeerStats()
 	m.lastHandshake = ps.LastHandshakeSec
 	m.wgTxBytes = ps.TxBytes
-	if ps.RxBytes != m.lastRxBytes {
-		// record the moment inbound bytes last advanced so the watchdog can spot
-		// a tunnel that transmits but never receives.
-		m.lastRxBytes = ps.RxBytes
-		m.rxChangedAt = now
-	}
 	m.wgRxBytes = ps.RxBytes
 }
 
@@ -265,9 +269,6 @@ func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf
 	defer ticker.Stop()
 	startedAt := time.Now()
 
-	// txBytes observed on the previous tick; we only treat an rx stall as real
-	// while outbound demand is present (i.e. we are actively sending).
-	var prevTxBytes int64
 	for {
 		select {
 		case <-ctx.Done():
@@ -280,22 +281,19 @@ func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf
 				return
 			}
 			last := m.lastHandshake
-			txBytes := m.wgTxBytes
-			rxBytes := m.wgRxBytes
-			rxChangedAt := m.rxChangedAt
+			appTxAt := m.appTxAt
+			appRxAt := m.appRxAt
 			m.mu.Unlock()
 
 			now := time.Now()
-			txGrowing := txBytes > prevTxBytes
-			prevTxBytes = txBytes
-			log.Printf("handshake watch: last_handshake=%d tx=%d rx=%d rx_changed_ago=%s tx_growing=%t",
-				last, txBytes, rxBytes, ageString(rxChangedAt, now), txGrowing)
+			log.Printf("handshake watch: last_handshake=%d app_tx_ago=%s app_rx_ago=%s",
+				last, ageString(appTxAt, now), ageString(appRxAt, now))
 
 			reason := reconnectReason(reconnectInputs{
 				lastHandshake: last,
 				startedAt:     startedAt,
-				txGrowing:     txGrowing,
-				rxChangedAt:   rxChangedAt,
+				appTxAt:       appTxAt,
+				appRxAt:       appRxAt,
 				now:           now,
 			})
 			if reason != "" {
@@ -309,10 +307,10 @@ func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf
 
 // reconnectInputs bundles the state a reconnect decision is made from.
 type reconnectInputs struct {
-	lastHandshake int64        // unix seconds, 0 if never
-	startedAt     time.Time    // tunnel start, for the never-handshaked grace window
-	txGrowing     bool         // outbound wgTxBytes advanced since the previous tick
-	rxChangedAt   time.Time    // last time inbound wgRxBytes advanced; zero if never
+	lastHandshake int64     // unix seconds, 0 if never
+	startedAt     time.Time // tunnel start, for the never-handshaked grace window
+	appTxAt       time.Time // last time real outbound app bytes were sent; zero if never
+	appRxAt       time.Time // last time real inbound app bytes arrived; zero if never
 	now           time.Time
 }
 
@@ -332,11 +330,16 @@ func reconnectReason(in reconnectInputs) string {
 		return fmt.Sprintf("handshake stale (age %s > %s)", handshakeAge, handshakeStaleAfter)
 	}
 
-	// Signal 2: fake-alive. We're sending but receiving nothing for a while.
-	// Only fire while we actually have outbound demand so a truly idle tunnel
-	// isn't needlessly torn down.
-	if in.txGrowing && !in.rxChangedAt.IsZero() && in.now.Sub(in.rxChangedAt) > rxStallAfter {
-		return fmt.Sprintf("rx stall - tx growing but no rx for %s", in.now.Sub(in.rxChangedAt))
+	// Signal 2: fake-alive. The gateway can keep answering WireGuard handshakes
+	// (and our persistent keepalive keeps the wire-level tx counter moving) long
+	// after it has started silently dropping data. We detect that using ONLY
+	// application-level counters: recent real outbound demand (appTxAt within
+	// rxStallAfter) while no real inbound bytes have arrived for rxStallAfter.
+	// A truly idle tunnel has no recent appTxAt and is never torn down here — the
+	// keepalive-driven wire-level tx growth that used to trigger this is ignored.
+	if !in.appTxAt.IsZero() && in.now.Sub(in.appTxAt) < rxStallAfter &&
+		!in.appRxAt.IsZero() && in.now.Sub(in.appRxAt) > rxStallAfter {
+		return fmt.Sprintf("rx stall - app tx active but no app rx for %s", in.now.Sub(in.appRxAt))
 	}
 	return ""
 }

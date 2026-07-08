@@ -50,29 +50,46 @@ func TestReconnectReason(t *testing.T) {
 		wantReason bool // expect a non-empty reason (i.e. should reconnect)
 	}{
 		{
-			name: "healthy fresh handshake, idle",
+			name: "healthy fresh handshake, never used",
 			in:   fresh(func(in *reconnectInputs) {}),
 		},
 		{
-			name: "healthy but rx flat - idle tunnel (no tx demand) must NOT reconnect",
+			name: "idle tunnel: keepalive keeps wire-tx growing but no real app demand - must NOT reconnect",
 			in: fresh(func(in *reconnectInputs) {
-				in.txGrowing = false
-				in.rxChangedAt = now.Add(-5 * time.Minute)
+				// The old wire-level watchdog saw keepalive as "tx growing" here and
+				// tore the tunnel down every 60s. App-level counters show no recent
+				// outbound demand, so it must stay up.
+				in.appTxAt = now.Add(-5 * time.Minute)
+				in.appRxAt = now.Add(-5 * time.Minute)
 			}),
 		},
 		{
-			name:       "fake-alive: tx growing but rx stalled past threshold",
+			name: "download finished, tunnel idle - stale rx but no recent tx demand must NOT reconnect",
+			in: fresh(func(in *reconnectInputs) {
+				in.appTxAt = now.Add(-2 * time.Minute)
+				in.appRxAt = now.Add(-2 * time.Minute)
+			}),
+		},
+		{
+			name:       "fake-alive: recent app tx demand but app rx stalled past threshold",
 			wantReason: true,
 			in: fresh(func(in *reconnectInputs) {
-				in.txGrowing = true
-				in.rxChangedAt = now.Add(-(rxStallAfter + time.Second))
+				in.appTxAt = now.Add(-5 * time.Second)
+				in.appRxAt = now.Add(-(rxStallAfter + time.Second))
 			}),
 		},
 		{
-			name: "tx growing but rx only just stalled - within grace, keep going",
+			name: "recent app tx but app rx only just stalled - within grace, keep going",
 			in: fresh(func(in *reconnectInputs) {
-				in.txGrowing = true
-				in.rxChangedAt = now.Add(-(rxStallAfter - 10 * time.Second))
+				in.appTxAt = now.Add(-5 * time.Second)
+				in.appRxAt = now.Add(-(rxStallAfter - 10*time.Second))
+			}),
+		},
+		{
+			name: "app rx stalled past threshold but no inbound ever seen - not fake-alive, wait for handshake",
+			in: fresh(func(in *reconnectInputs) {
+				in.appTxAt = now.Add(-5 * time.Second)
+				// appRxAt zero: never received real app bytes yet.
 			}),
 		},
 		{
@@ -94,7 +111,7 @@ func TestReconnectReason(t *testing.T) {
 			name:       "handshake stale past threshold",
 			wantReason: true,
 			in: fresh(func(in *reconnectInputs) {
-				in.lastHandshake = now.Add(-(handshakeStaleAfter + 10 * time.Second)).Unix()
+				in.lastHandshake = now.Add(-(handshakeStaleAfter + 10*time.Second)).Unix()
 			}),
 		},
 	}
