@@ -56,9 +56,14 @@ func (a *ProxyAuth) required() bool { return a != nil && a.Username != "" }
 // mixed-port). All upstream connections are dialed via the provided Dialer so
 // traffic egresses through the VPN tunnel; DNS is resolved in-tunnel.
 type MixedProxy struct {
+	// tunMu guards dialer/resolver so a background refresh can swap the proxy
+	// onto a freshly-established tunnel (make-before-break) without dropping the
+	// listener or connections already bound to the previous tunnel.
+	tunMu    sync.RWMutex
 	dialer   Dialer
 	resolver Resolver
-	auth     *ProxyAuth
+
+	auth *ProxyAuth
 
 	dnsMu    sync.Mutex
 	dnsCache map[string]dnsCacheEntry
@@ -91,6 +96,24 @@ func NewMixedProxy(dialer Dialer, auth *ProxyAuth) *MixedProxy {
 		dnsCalls: make(map[string]*dnsLookupCall),
 		closed:   make(chan struct{}),
 	}
+}
+
+// SetTunnel atomically swaps the dialer/resolver the proxy dials through, so a
+// background refresh can move new connections onto a freshly-established tunnel
+// (make-before-break) without dropping the listener. Connections already relaying
+// keep using whatever tunnel they were dialed on until they close.
+func (p *MixedProxy) SetTunnel(dialer Dialer, resolver Resolver) {
+	p.tunMu.Lock()
+	p.dialer = dialer
+	p.resolver = resolver
+	p.tunMu.Unlock()
+}
+
+// tunnel returns the currently active dialer/resolver under the read lock.
+func (p *MixedProxy) tunnel() (Dialer, Resolver) {
+	p.tunMu.RLock()
+	defer p.tunMu.RUnlock()
+	return p.dialer, p.resolver
 }
 
 // ListenAndServe binds listenAddr and serves until Close is called.
@@ -224,11 +247,15 @@ func (p *MixedProxy) handleSocks5(client net.Conn, br *bufio.Reader) {
 }
 
 func (p *MixedProxy) dialContext(ctx context.Context, network, host, port string) (net.Conn, error) {
+	// Snapshot the active tunnel once so a mid-dial refresh swap stays consistent
+	// for this connection.
+	dialer, resolver := p.tunnel()
+
 	// Record outbound demand at the entry point — before in-tunnel DNS and the
 	// dial — so a tunnel dead enough to hang even DNS resolution still registers
 	// as "in use" for the handshake watchdog. Without this, a request that stalls
 	// in lookupHost never reaches DialContext and the watchdog can't see demand.
-	if m, ok := p.dialer.(dialActivityMarker); ok {
+	if m, ok := dialer.(dialActivityMarker); ok {
 		m.MarkDialActivity()
 	}
 
@@ -238,17 +265,17 @@ func (p *MixedProxy) dialContext(ctx context.Context, network, host, port string
 		defer cancel()
 	}
 
-	if net.ParseIP(host) != nil || p.resolver == nil {
-		return p.dialer.DialContext(ctx, network, net.JoinHostPort(host, port))
+	if net.ParseIP(host) != nil || resolver == nil {
+		return dialer.DialContext(ctx, network, net.JoinHostPort(host, port))
 	}
 
-	addrs, err := p.lookupHost(ctx, host)
+	addrs, err := p.lookupHost(ctx, resolver, host)
 	if err != nil {
 		return nil, err
 	}
 	var lastErr error
 	for _, addr := range addrs {
-		upstream, err := p.dialer.DialContext(ctx, network, net.JoinHostPort(addr, port))
+		upstream, err := dialer.DialContext(ctx, network, net.JoinHostPort(addr, port))
 		if err == nil {
 			return upstream, nil
 		}
@@ -260,7 +287,7 @@ func (p *MixedProxy) dialContext(ctx context.Context, network, host, port string
 	return nil, &net.DNSError{Err: "no addresses found", Name: host}
 }
 
-func (p *MixedProxy) lookupHost(ctx context.Context, host string) ([]string, error) {
+func (p *MixedProxy) lookupHost(ctx context.Context, resolver Resolver, host string) ([]string, error) {
 	now := time.Now()
 	p.dnsMu.Lock()
 	if entry, ok := p.dnsCache[host]; ok && now.Before(entry.expires) {
@@ -284,7 +311,7 @@ func (p *MixedProxy) lookupHost(ctx context.Context, host string) ([]string, err
 	p.dnsCalls[host] = call
 	p.dnsMu.Unlock()
 
-	addrs, err := p.resolveHost(ctx, host)
+	addrs, err := p.resolveHost(ctx, resolver, host)
 
 	p.dnsMu.Lock()
 	if err == nil {
@@ -302,10 +329,10 @@ func (p *MixedProxy) lookupHost(ctx context.Context, host string) ([]string, err
 	return addrs, err
 }
 
-func (p *MixedProxy) resolveHost(ctx context.Context, host string) ([]string, error) {
+func (p *MixedProxy) resolveHost(ctx context.Context, resolver Resolver, host string) ([]string, error) {
 	var lastErr error
 	for attempt := 0; attempt < dnsLookupRetries; attempt++ {
-		addrs, err := p.resolver.LookupHost(ctx, host)
+		addrs, err := resolver.LookupHost(ctx, host)
 		if err != nil {
 			lastErr = err
 			continue

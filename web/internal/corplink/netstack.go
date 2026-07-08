@@ -263,6 +263,24 @@ func (n *NetstackDevice) Transfer() (rx, tx int64) {
 	return n.rxBytes.Load(), n.txBytes.Load()
 }
 
+// Probe verifies the tunnel's data path actually works end-to-end by opening a
+// short TCP connection through it to probeAddr (typically the in-tunnel DNS
+// server on :53) and confirming the peer answers. WireGuard handshakes can
+// succeed on a tunnel whose data plane is dead (gateway integrity cutoff), so a
+// completed handshake is not sufficient — this exercises the real path. It does
+// not count as MarkDialActivity demand.
+func (n *NetstackDevice) Probe(ctx context.Context, probeAddr string) error {
+	c, err := n.tun.DialContext(ctx, "tcp", probeAddr)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	// A successful TCP handshake to an in-tunnel host proves bidirectional data
+	// flow (SYN out, SYN-ACK back) — enough to distinguish a live tunnel from one
+	// whose data plane the gateway has silently cut.
+	return nil
+}
+
 // Close tears down the WireGuard device.
 func (n *NetstackDevice) Close() {
 	if n.closed.Swap(true) {

@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# # syntax=docker/dockerfile:1
 # (the syntax line is optional; comment it out if your builder can't fetch the
 # external frontend, e.g. behind a TUN VPN that intercepts registry pulls)
 

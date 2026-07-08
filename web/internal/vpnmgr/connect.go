@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"time"
 
@@ -41,53 +42,20 @@ func (m *Manager) Connect(ctx context.Context, serverID int, otp string) error {
 }
 
 func (m *Manager) connectReal(ctx context.Context, otp string) error {
-	vpns, err := m.client.ListVPN(ctx)
-	if err != nil {
-		if corplink.IsLoggedOut(err) {
-			m.setState(StateLoggedOut, err.Error())
-		}
-		return err
-	}
-
-	node, err := m.client.SelectVPN(ctx, vpns)
+	device, wgConf, node, err := m.buildTunnel(ctx, otp)
 	if err != nil {
 		return err
 	}
-
-	// Don't pre-gate on 2FA. Most accounts either have no 2FA at all (an empty
-	// code connects fine) or have a TOTP secret we generate automatically. Try
-	// the handshake first; only prompt for a code if the server actually
-	// rejects it for an OTP-related reason.
-	info, err := m.client.FetchPeerInfo(ctx, otp)
-	if err != nil {
-		if corplink.IsLoggedOut(err) {
-			m.setState(StateLoggedOut, err.Error())
-			return err
-		}
-		if otp == "" && !m.client.HasOTPSecret() && looksLikeOTPError(err) {
-			return ErrNeedOTP
-		}
-		return err
+	// Validate the data path before committing, but only when no OTP handoff is
+	// in play (buildLiveTunnel always uses an empty OTP on retry). For the very
+	// first connect we keep the caller-supplied otp path via buildTunnel above and
+	// probe once here; a dead first tunnel will be caught by the watchdog/refresher.
+	probeAddr := tunnelProbeAddr(wgConf)
+	pctx, pcancel := context.WithTimeout(ctx, tunnelProbeTimeout)
+	if perr := device.Probe(pctx, probeAddr); perr != nil {
+		log.Printf("initial tunnel data-path probe failed: %v (continuing; refresher will rotate)", perr)
 	}
-
-	wgConf, err := m.client.BuildWgConf(*node, info)
-	if err != nil {
-		return err
-	}
-	log.Printf(
-		"wireguard config: protocol=%d endpoint=%s address=%s ipv6=%t allowed_ips=%d dns=%q",
-		wgConf.Protocol,
-		wgConf.PeerAddress,
-		wgConf.Address,
-		wgConf.Address6 != "",
-		len(wgConf.AllowedIPs),
-		wgConf.DNS,
-	)
-
-	device, err := corplink.StartNetstackWithProxy(wgConf, m.client.UpstreamProxy())
-	if err != nil {
-		return err
-	}
+	pcancel()
 
 	var auth *corplink.ProxyAuth
 	if m.conf.ProxyAuthEnabled && m.conf.ProxyUsername != "" {
@@ -113,10 +81,7 @@ func (m *Manager) connectReal(ctx context.Context, otp string) error {
 	m.curID = node.ID
 	m.curName = node.EnName
 	m.curAddress = wgConf.Address
-	m.lastRx, m.lastTx = 0, 0
-	m.lastHandshake = 0
-	m.wgTxBytes, m.wgRxBytes = 0, 0
-	m.lastSampleTime = time.Now()
+	m.resetTunnelStatsLocked()
 	m.state = StateConnected
 	m.lastErr = ""
 	loopCtx, cancel := context.WithCancel(context.Background())
@@ -124,9 +89,120 @@ func (m *Manager) connectReal(ctx context.Context, otp string) error {
 	m.mu.Unlock()
 
 	go m.runSampler(loopCtx)
-	go m.runReporter(loopCtx, wgConf)
-	go m.runHandshakeWatch(loopCtx, wgConf)
+	go m.runReporter(loopCtx)
+	go m.runHandshakeWatch(loopCtx)
+	go m.runRefresher(loopCtx)
 	return nil
+}
+
+// buildTunnel performs the handshake exchange and brings up a fresh userspace
+// WireGuard device for the selected node. It does not touch Manager state, so it
+// is safe to call both for the initial connect and for a background refresh.
+func (m *Manager) buildTunnel(ctx context.Context, otp string) (*corplink.NetstackDevice, *corplink.WgConf, *corplink.VPNInfo, error) {
+	vpns, err := m.client.ListVPN(ctx)
+	if err != nil {
+		if corplink.IsLoggedOut(err) {
+			m.setState(StateLoggedOut, err.Error())
+		}
+		return nil, nil, nil, err
+	}
+
+	node, err := m.client.SelectVPN(ctx, vpns)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Don't pre-gate on 2FA. Most accounts either have no 2FA at all (an empty
+	// code connects fine) or have a TOTP secret we generate automatically. Try
+	// the handshake first; only prompt for a code if the server actually
+	// rejects it for an OTP-related reason.
+	info, err := m.client.FetchPeerInfo(ctx, otp)
+	if err != nil {
+		if corplink.IsLoggedOut(err) {
+			m.setState(StateLoggedOut, err.Error())
+			return nil, nil, nil, err
+		}
+		if otp == "" && !m.client.HasOTPSecret() && looksLikeOTPError(err) {
+			return nil, nil, nil, ErrNeedOTP
+		}
+		return nil, nil, nil, err
+	}
+
+	wgConf, err := m.client.BuildWgConf(*node, info)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	log.Printf(
+		"wireguard config: protocol=%d endpoint=%s address=%s ipv6=%t allowed_ips=%d dns=%q",
+		wgConf.Protocol,
+		wgConf.PeerAddress,
+		wgConf.Address,
+		wgConf.Address6 != "",
+		len(wgConf.AllowedIPs),
+		wgConf.DNS,
+	)
+
+	device, err := corplink.StartNetstackWithProxy(wgConf, m.client.UpstreamProxy())
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return device, wgConf, node, nil
+}
+
+// buildLiveTunnel builds a tunnel and verifies its data path works before
+// returning it, retrying a few times because a freshly-handshaked CorpLink
+// tunnel is sometimes dead-on-arrival (the gateway's data plane doesn't come up
+// even though the handshake completed). A validated tunnel is essential for the
+// refresher: swapping the proxy onto a dead tunnel would break every connection.
+func (m *Manager) buildLiveTunnel(ctx context.Context) (*corplink.NetstackDevice, *corplink.WgConf, *corplink.VPNInfo, error) {
+	var lastErr error
+	for attempt := 0; attempt < tunnelBuildAttempts; attempt++ {
+		device, wgConf, node, err := m.buildTunnel(ctx, "")
+		if err != nil {
+			return nil, nil, nil, err // build/handshake errors are not transient here
+		}
+		probeAddr := tunnelProbeAddr(wgConf)
+		pctx, cancel := context.WithTimeout(ctx, tunnelProbeTimeout)
+		err = device.Probe(pctx, probeAddr)
+		cancel()
+		if err == nil {
+			return device, wgConf, node, nil
+		}
+		lastErr = err
+		log.Printf("new tunnel failed data-path probe (attempt %d/%d): %v", attempt+1, tunnelBuildAttempts, err)
+		device.Close()
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("tunnel probe failed")
+	}
+	return nil, nil, nil, lastErr
+}
+
+// tunnelProbeAddr picks an in-tunnel host:port to validate the data path against
+// — the tunnel's DNS server on port 53, which every CorpLink node routes.
+func tunnelProbeAddr(wgConf *corplink.WgConf) string {
+	dns := strings.FieldsFunc(wgConf.DNS, func(r rune) bool { return r == ',' || r == ' ' })
+	if len(dns) > 0 && strings.TrimSpace(dns[0]) != "" {
+		return net.JoinHostPort(strings.TrimSpace(dns[0]), "53")
+	}
+	return "223.5.5.5:53"
+}
+
+const (
+	tunnelBuildAttempts = 4
+	tunnelProbeTimeout  = 5 * time.Second
+)
+
+// resetTunnelStatsLocked zeroes the per-tunnel sampling baselines. Caller holds m.mu.
+func (m *Manager) resetTunnelStatsLocked() {
+	m.lastRx, m.lastTx = 0, 0
+	m.lastHandshake = 0
+	m.wgTxBytes, m.wgRxBytes = 0, 0
+	m.lastSampleTime = time.Now()
+	m.appTxAt = time.Time{}
+	m.appRxAt = time.Time{}
+	m.dialAt = time.Time{}
+	m.tunnelSince = time.Now()
 }
 
 // Disconnect tears down the tunnel and proxy, reporting the disconnect.
@@ -233,7 +309,7 @@ func (m *Manager) sampleOnce() {
 // selected node. Some CorpLink gateways expire node-side session state if the
 // mobile client stops reporting after the initial connect, even though the
 // WireGuard transport keepalive is still running.
-func (m *Manager) runReporter(ctx context.Context, wgConf *corplink.WgConf) {
+func (m *Manager) runReporter(ctx context.Context) {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 	mode := routeModeReport(m.conf.RouteModeOrDefault())
@@ -242,12 +318,125 @@ func (m *Manager) runReporter(ctx context.Context, wgConf *corplink.WgConf) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := m.client.ReportDevice(ctx, wgConf.Address, mode, false); err != nil {
+			m.mu.Lock()
+			addr := m.curAddress
+			m.mu.Unlock()
+			if err := m.client.ReportDevice(ctx, addr, mode, false); err != nil {
 				log.Printf("wireguard report failed: %v", err)
 			}
 		}
 	}
 }
+
+// tunnelRefreshAfter is how long a freshly-established tunnel is used before the
+// refresher proactively rotates it. Some Feilian gateways enforce a client
+// "integrity heartbeat" (an encrypted per-few-seconds report the official client
+// sends) and silently cut the data path ~60s after connect when they don't see
+// it — the /vpn/report reply is {"code":1000,"action":"alert"}. We cannot forge
+// that proprietary heartbeat, so instead we make-before-break: build a brand new
+// tunnel (new session, fresh cutoff budget) and hot-swap the proxy onto it just
+// before the old one is due to die, so proxied connections never see the gap.
+// Kept well under the observed ~60s cutoff (some sessions die sooner) so a fresh,
+// data-path-validated tunnel is always ready ahead of the old one failing.
+const tunnelRefreshAfter = 18 * time.Second
+
+// runRefresher proactively rotates the tunnel before the gateway's integrity
+// cutoff. It builds a new tunnel out-of-band, atomically swaps the live proxy
+// onto it, then retires the old device after a short drain so in-flight
+// connections on it can finish.
+func (m *Manager) runRefresher(ctx context.Context) {
+	ticker := time.NewTicker(tunnelRefreshAfter)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := m.refreshTunnel(ctx); err != nil {
+				// Non-fatal: the handshake watchdog remains the backstop if a
+				// refresh fails and the current tunnel later dies.
+				log.Printf("tunnel refresh failed: %v", err)
+			}
+		}
+	}
+}
+
+// refreshTunnel builds a replacement tunnel and hot-swaps the proxy onto it
+// without dropping the listener (make-before-break). The old device is closed
+// after a short drain window. Calls are serialized and rate-limited so the timer
+// and stall-detector paths don't build tunnels concurrently or thrash.
+func (m *Manager) refreshTunnel(ctx context.Context) error {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+
+	m.mu.Lock()
+	proxy := m.proxy
+	oldDevice := m.device
+	oldAddress := m.curAddress
+	sinceLast := time.Since(m.lastRefreshAt)
+	if m.state != StateConnected || proxy == nil || oldDevice == nil {
+		m.mu.Unlock()
+		return nil
+	}
+	m.mu.Unlock()
+
+	// Coalesce refreshes that land right on top of each other (e.g. stall detector
+	// firing just after the periodic timer).
+	if sinceLast < minRefreshInterval {
+		return nil
+	}
+
+	bctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	device, wgConf, node, err := m.buildLiveTunnel(bctx)
+	if err != nil {
+		return err
+	}
+
+	// Swap the proxy onto the new tunnel; new connections use it immediately.
+	proxy.SetTunnel(device, device)
+
+	// Report the new session so the node marks it active.
+	mode := routeModeReport(m.conf.RouteModeOrDefault())
+	_ = m.client.ReportDevice(bctx, wgConf.Address, mode, false)
+
+	m.mu.Lock()
+	// A manual disconnect/reconnect may have raced us; if so, abandon the new
+	// tunnel rather than resurrect a torn-down connection.
+	if m.state != StateConnected || m.proxy != proxy {
+		m.mu.Unlock()
+		device.Close()
+		return nil
+	}
+	m.device = device
+	m.curID = node.ID
+	m.curName = node.EnName
+	m.curAddress = wgConf.Address
+	m.resetTunnelStatsLocked()
+	m.lastRefreshAt = time.Now()
+	m.mu.Unlock()
+
+	log.Printf("tunnel refreshed: new session on %s (%s)", node.EnName, wgConf.Address)
+
+	// Drain the old tunnel briefly so connections dialed on it can finish, then
+	// close it. Report its disconnect best-effort so the node frees the session.
+	go func(dev *corplink.NetstackDevice, addr string) {
+		time.Sleep(tunnelDrainAfter)
+		if addr != "" {
+			_ = m.client.ReportDevice(context.Background(), addr, mode, true)
+		}
+		dev.Close()
+	}(oldDevice, oldAddress)
+	return nil
+}
+
+// tunnelDrainAfter is how long the previous tunnel is kept alive after a refresh
+// swap so connections still relaying on it can drain before it is closed.
+const tunnelDrainAfter = 10 * time.Second
+
+// minRefreshInterval coalesces refreshes triggered close together (periodic
+// timer + stall detector) so we don't build tunnels back-to-back.
+const minRefreshInterval = 8 * time.Second
 
 // runHandshakeWatch reconnects the tunnel when it detects the data path is dead.
 // It uses two complementary signals, because CorpLink gateways can keep the
@@ -265,10 +454,9 @@ func (m *Manager) runReporter(ctx context.Context, wgConf *corplink.WgConf) {
 //
 // Stats come from runSampler's per-second PeerStats() cache, so this loop never
 // hits the wg-go UAPI itself.
-func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf) {
-	ticker := time.NewTicker(20 * time.Second)
+func (m *Manager) runHandshakeWatch(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	startedAt := time.Now()
 
 	for {
 		select {
@@ -285,6 +473,10 @@ func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf
 			appTxAt := m.appTxAt
 			appRxAt := m.appRxAt
 			dialAt := m.dialAt
+			// Measure grace windows from when the CURRENT tunnel became live (last
+			// refresh swap), not the watchdog's own start, so a freshly rotated
+			// tunnel isn't condemned for the previous one's silence.
+			startedAt := m.tunnelSince
 			m.mu.Unlock()
 
 			now := time.Now()
@@ -300,9 +492,17 @@ func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf
 				now:           now,
 			})
 			if reason != "" {
-				log.Printf("reconnect: %s", reason)
-				go m.reconnect()
-				return
+				// Prefer a graceful make-before-break refresh over a hard teardown:
+				// build+validate a new tunnel and hot-swap onto it so existing
+				// connections aren't dropped. Fall back to a full reconnect only if
+				// the refresh itself fails (e.g. can't build a live tunnel at all).
+				log.Printf("tunnel stall detected (%s); refreshing", reason)
+				if err := m.refreshTunnel(ctx); err != nil {
+					log.Printf("stall refresh failed (%v); hard reconnect", err)
+					go m.reconnect()
+					return
+				}
+				// keep watching on the same loop; the swapped tunnel reset tunnelSince.
 			}
 		}
 	}

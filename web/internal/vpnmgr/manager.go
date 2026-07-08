@@ -27,14 +27,16 @@ const handshakeStaleAfter = 210 * time.Second
 const handshakeStaleAfterSec = int64(handshakeStaleAfter / time.Second)
 
 // rxStallAfter is how long real outbound traffic may keep flowing with zero real
-// inbound bytes before we declare the tunnel "fake-alive". CorpLink gateways
-// sometimes keep answering WireGuard handshakes long after they have started
-// silently dropping every data packet (session revoked / device invalidated
-// server-side), so a fresh handshake timestamp is NOT proof of a working tunnel.
-// Demand and stall are measured from APPLICATION-level counters (countingConn),
-// which exclude WireGuard keepalive — an idle tunnel has no outbound demand and
-// is never torn down here even though keepalive keeps the wire-level tx growing.
-const rxStallAfter = 60 * time.Second
+// inbound bytes before we treat the tunnel as stalled. Must be longer than
+// proxyDialTimeout (15s) to avoid false positives on slow but valid dials. The
+// response to a stall is a non-disruptive make-before-break refresh (swap onto a
+// fresh validated tunnel, no dropped connections). Some Feilian sessions get
+// their data path cut ~20s after connect by the gateway's client-integrity
+// enforcement, so we rotate well inside that window while still allowing slow
+// dials to complete. Demand and stall are measured from APPLICATION-level
+// counters (countingConn) plus dial attempts, which exclude WireGuard keepalive
+// — an idle tunnel has no outbound demand and is never rotated by this path.
+const rxStallAfter = 20 * time.Second
 
 // Status is a snapshot of the manager's current state for the UI.
 type Status struct {
@@ -121,6 +123,17 @@ type Manager struct {
 	// recent appTxAt) is left alone regardless of keepalive traffic.
 	appTxAt time.Time
 	appRxAt time.Time
+
+	// tunnelSince is when the currently-active tunnel became live (initial connect
+	// or the last make-before-break refresh swap). The handshake watchdog measures
+	// its grace windows from here so a just-swapped tunnel isn't judged by the
+	// previous one's silence.
+	tunnelSince time.Time
+
+	// refreshMu serializes make-before-break tunnel refreshes; lastRefreshAt
+	// rate-limits them so the periodic timer and stall detector don't thrash.
+	refreshMu     sync.Mutex
+	lastRefreshAt time.Time
 
 	// dialAt is the last time the proxy attempted a dial through the tunnel
 	// (success or failure). Failing dials on a dead tunnel produce no app-level
