@@ -218,6 +218,7 @@ func (m *Manager) sampleOnce() {
 	}
 	m.lastRx, m.lastTx = rx, tx
 	m.lastSampleTime = now
+	m.dialAt = m.device.LastDialActivity()
 
 	// refresh cached WireGuard peer stats so Traffic() never blocks on the
 	// wg-go UAPI. Reads are cheap (one IpcGet per second). These wire-level
@@ -283,17 +284,19 @@ func (m *Manager) runHandshakeWatch(ctx context.Context, wgConf *corplink.WgConf
 			last := m.lastHandshake
 			appTxAt := m.appTxAt
 			appRxAt := m.appRxAt
+			dialAt := m.dialAt
 			m.mu.Unlock()
 
 			now := time.Now()
-			log.Printf("handshake watch: last_handshake=%d app_tx_ago=%s app_rx_ago=%s",
-				last, ageString(appTxAt, now), ageString(appRxAt, now))
+			log.Printf("handshake watch: last_handshake=%d app_tx_ago=%s app_rx_ago=%s dial_ago=%s",
+				last, ageString(appTxAt, now), ageString(appRxAt, now), ageString(dialAt, now))
 
 			reason := reconnectReason(reconnectInputs{
 				lastHandshake: last,
 				startedAt:     startedAt,
 				appTxAt:       appTxAt,
 				appRxAt:       appRxAt,
+				dialAt:        dialAt,
 				now:           now,
 			})
 			if reason != "" {
@@ -311,6 +314,7 @@ type reconnectInputs struct {
 	startedAt     time.Time // tunnel start, for the never-handshaked grace window
 	appTxAt       time.Time // last time real outbound app bytes were sent; zero if never
 	appRxAt       time.Time // last time real inbound app bytes arrived; zero if never
+	dialAt        time.Time // last dial attempt through the tunnel (success or fail); zero if never
 	now           time.Time
 }
 
@@ -318,30 +322,46 @@ type reconnectInputs struct {
 // torn down and re-established, or "" when it looks healthy. Extracted from the
 // watchdog loop so the decision is unit-testable.
 func reconnectReason(in reconnectInputs) string {
-	// Signal 1: handshake stale / never happened.
+	// Signal 1: handshake stale. A handshake older than handshakeStaleAfter (or a
+	// never-completed one past the same grace window) means the peer has stopped
+	// responding entirely.
 	if in.lastHandshake == 0 {
 		if in.now.Sub(in.startedAt) > handshakeStaleAfter {
 			return fmt.Sprintf("no handshake within %s of tunnel start", handshakeStaleAfter)
 		}
-		return ""
-	}
-	handshakeAge := in.now.Sub(time.Unix(in.lastHandshake, 0))
-	if handshakeAge > handshakeStaleAfter {
+		// fall through: a never-handshaked tunnel that is already failing dials
+		// shouldn't have to wait the full grace window (see signal 2).
+	} else if handshakeAge := in.now.Sub(time.Unix(in.lastHandshake, 0)); handshakeAge > handshakeStaleAfter {
 		return fmt.Sprintf("handshake stale (age %s > %s)", handshakeAge, handshakeStaleAfter)
 	}
 
-	// Signal 2: fake-alive. The gateway can keep answering WireGuard handshakes
-	// (and our persistent keepalive keeps the wire-level tx counter moving) long
-	// after it has started silently dropping data. We detect that using ONLY
-	// application-level counters: recent real outbound demand (appTxAt within
-	// rxStallAfter) while no real inbound bytes have arrived for rxStallAfter.
-	// A truly idle tunnel has no recent appTxAt and is never torn down here — the
-	// keepalive-driven wire-level tx growth that used to trigger this is ignored.
-	if !in.appTxAt.IsZero() && in.now.Sub(in.appTxAt) < rxStallAfter &&
-		!in.appRxAt.IsZero() && in.now.Sub(in.appRxAt) > rxStallAfter {
-		return fmt.Sprintf("rx stall - app tx active but no app rx for %s", in.now.Sub(in.appRxAt))
+	// Signal 2: dead under load. There is recent outbound demand — real bytes
+	// went out (appTxAt) OR the proxy attempted a dial (dialAt, which times out
+	// on a dead tunnel and never becomes countingConn bytes) — yet no real
+	// inbound bytes have arrived for rxStallAfter. This catches a gateway that
+	// keeps answering WireGuard handshakes while silently dropping all data
+	// (session revoked / fake-alive), including the hard case where every dial
+	// times out. WireGuard keepalive touches none of these app-level signals, so
+	// a truly idle tunnel (no recent demand) is never torn down here.
+	recentDemand := within(in.appTxAt, in.now, rxStallAfter) || within(in.dialAt, in.now, rxStallAfter)
+	if recentDemand {
+		// How long inbound has been silent. For a tunnel that never received any
+		// app bytes, measure from its start so a healthy just-connected tunnel
+		// with an in-flight first request isn't torn down before it can reply.
+		inboundSilent := in.now.Sub(in.startedAt)
+		if !in.appRxAt.IsZero() {
+			inboundSilent = in.now.Sub(in.appRxAt)
+		}
+		if inboundSilent > rxStallAfter {
+			return fmt.Sprintf("dead under load - outbound demand but no inbound for %s", inboundSilent)
+		}
 	}
 	return ""
+}
+
+// within reports whether t is non-zero and less than d ago relative to now.
+func within(t, now time.Time, d time.Duration) bool {
+	return !t.IsZero() && now.Sub(t) < d
 }
 
 // ageString renders a duration-since in a compact form for log lines, tolerating

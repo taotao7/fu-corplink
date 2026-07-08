@@ -122,6 +122,12 @@ type Manager struct {
 	appTxAt time.Time
 	appRxAt time.Time
 
+	// dialAt is the last time the proxy attempted a dial through the tunnel
+	// (success or failure). Failing dials on a dead tunnel produce no app-level
+	// bytes, so this is the outbound-demand signal that lets the watchdog catch a
+	// tunnel that is dead enough to time out every connection.
+	dialAt time.Time
+
 	serverCache []Server
 	cacheMu     sync.Mutex
 

@@ -68,6 +68,7 @@ func TestReconnectReason(t *testing.T) {
 			in: fresh(func(in *reconnectInputs) {
 				in.appTxAt = now.Add(-2 * time.Minute)
 				in.appRxAt = now.Add(-2 * time.Minute)
+				in.dialAt = now.Add(-2 * time.Minute)
 			}),
 		},
 		{
@@ -79,6 +80,26 @@ func TestReconnectReason(t *testing.T) {
 			}),
 		},
 		{
+			name:       "dead under load: dials being attempted but no inbound ever - reconnect without waiting handshake grace",
+			wantReason: true,
+			in: fresh(func(in *reconnectInputs) {
+				// Tunnel so dead every dial times out: no countingConn bytes at all,
+				// only dial attempts. Started long enough ago that inbound silence
+				// exceeds the threshold.
+				in.startedAt = now.Add(-(rxStallAfter + 30*time.Second))
+				in.dialAt = now.Add(-2 * time.Second)
+				// appTxAt / appRxAt zero: failing dials never transferred anything.
+			}),
+		},
+		{
+			name: "fresh connect, first request in flight - dial demand but within grace, keep going",
+			in: fresh(func(in *reconnectInputs) {
+				in.startedAt = now.Add(-5 * time.Second)
+				in.dialAt = now.Add(-2 * time.Second)
+				// no inbound yet, but the tunnel only just came up.
+			}),
+		},
+		{
 			name: "recent app tx but app rx only just stalled - within grace, keep going",
 			in: fresh(func(in *reconnectInputs) {
 				in.appTxAt = now.Add(-5 * time.Second)
@@ -86,10 +107,13 @@ func TestReconnectReason(t *testing.T) {
 			}),
 		},
 		{
-			name: "app rx stalled past threshold but no inbound ever seen - not fake-alive, wait for handshake",
+			name:       "long-lived tunnel actively sending but never once received - dead under load",
+			wantReason: true,
 			in: fresh(func(in *reconnectInputs) {
+				// Up for 5 minutes (fresh handshake), still sending, yet not a single
+				// inbound app byte ever arrived: fake-alive, must reconnect.
 				in.appTxAt = now.Add(-5 * time.Second)
-				// appRxAt zero: never received real app bytes yet.
+				// appRxAt zero: never received real app bytes.
 			}),
 		},
 		{

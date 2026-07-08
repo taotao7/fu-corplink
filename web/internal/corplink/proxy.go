@@ -37,6 +37,11 @@ type Resolver interface {
 	LookupHost(ctx context.Context, host string) ([]string, error)
 }
 
+// dialActivityMarker lets a dialer record that a proxied request was attempted,
+// even when the subsequent in-tunnel DNS or dial hangs on a dead tunnel. The
+// handshake watchdog treats this as outbound demand.
+type dialActivityMarker interface{ MarkDialActivity() }
+
 // ProxyAuth optionally gates the proxy with username/password credentials
 // (applied to SOCKS5 via RFC 1929 and to HTTP via Proxy-Authorization Basic).
 type ProxyAuth struct {
@@ -219,6 +224,14 @@ func (p *MixedProxy) handleSocks5(client net.Conn, br *bufio.Reader) {
 }
 
 func (p *MixedProxy) dialContext(ctx context.Context, network, host, port string) (net.Conn, error) {
+	// Record outbound demand at the entry point — before in-tunnel DNS and the
+	// dial — so a tunnel dead enough to hang even DNS resolution still registers
+	// as "in use" for the handshake watchdog. Without this, a request that stalls
+	// in lookupHost never reaches DialContext and the watchdog can't see demand.
+	if m, ok := p.dialer.(dialActivityMarker); ok {
+		m.MarkDialActivity()
+	}
+
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, proxyDialTimeout)

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
@@ -27,6 +28,12 @@ type NetstackDevice struct {
 
 	rxBytes atomic.Int64
 	txBytes atomic.Int64
+
+	// dialActivityAt is the unixnano of the last dial attempt through the tunnel,
+	// success or failure. A dead tunnel times out every dial and thus transfers
+	// no bytes, so this is the only outbound-demand signal the watchdog has for
+	// that state.
+	dialActivityAt atomic.Int64
 
 	mu sync.Mutex
 }
@@ -209,11 +216,30 @@ func hasIPv6(addrs []netip.Addr) bool {
 
 // DialContext dials a TCP connection through the tunnel.
 func (n *NetstackDevice) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	n.MarkDialActivity()
 	conn, err := n.tun.DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
 	}
 	return &countingConn{Conn: conn, dev: n}, nil
+}
+
+// MarkDialActivity records that a proxied request was attempted through the
+// tunnel. The proxy calls this at request entry — before in-tunnel DNS and the
+// dial — so a tunnel dead enough to hang DNS resolution (never reaching
+// DialContext) still shows outbound demand to the handshake watchdog.
+func (n *NetstackDevice) MarkDialActivity() {
+	n.dialActivityAt.Store(time.Now().UnixNano())
+}
+
+// LastDialActivity returns when a dial through the tunnel was last attempted
+// (whether it succeeded or failed), or the zero time if none yet.
+func (n *NetstackDevice) LastDialActivity() time.Time {
+	ns := n.dialActivityAt.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
 
 // LookupHost resolves a hostname using the tunnel's DNS configuration.
