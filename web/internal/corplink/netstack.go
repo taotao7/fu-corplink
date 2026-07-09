@@ -35,8 +35,20 @@ type NetstackDevice struct {
 	// that state.
 	dialActivityAt atomic.Int64
 
+	// activeConns counts proxied connections currently open on this device, so
+	// the refresher can hold off closing a drained-out tunnel while a transfer
+	// (e.g. a large asset download) is still in flight on it.
+	activeConns atomic.Int64
+
 	mu sync.Mutex
 }
+
+// trackConn registers one open proxied connection (paired with countingConn.Close).
+func (n *NetstackDevice) trackConn() { n.activeConns.Add(1) }
+
+// ActiveConns returns how many proxied connections are currently open on this
+// device.
+func (n *NetstackDevice) ActiveConns() int64 { return n.activeConns.Load() }
 
 // StartNetstack brings up a userspace WireGuard interface from the given config
 // and returns a running device. The tunnel addresses, MTU and DNS come from the
@@ -221,6 +233,7 @@ func (n *NetstackDevice) DialContext(ctx context.Context, network, addr string) 
 	if err != nil {
 		return nil, err
 	}
+	n.trackConn()
 	return &countingConn{Conn: conn, dev: n}, nil
 }
 
@@ -339,10 +352,20 @@ func parseInt64(s string) (int64, error) {
 	return v, err
 }
 
-// countingConn tallies bytes read/written through the tunnel.
+// countingConn tallies bytes read/written through the tunnel and keeps the
+// device's active-connection refcount, so the refresher knows when a retiring
+// tunnel still has transfers in flight.
 type countingConn struct {
 	net.Conn
-	dev *NetstackDevice
+	dev    *NetstackDevice
+	closed atomic.Bool
+}
+
+func (c *countingConn) Close() error {
+	if !c.closed.Swap(true) {
+		c.dev.activeConns.Add(-1)
+	}
+	return c.Conn.Close()
 }
 
 func (c *countingConn) Read(p []byte) (int, error) {

@@ -154,16 +154,24 @@ func (m *Manager) buildTunnel(ctx context.Context, otp string) (*corplink.Netsta
 // tunnel is sometimes dead-on-arrival (the gateway's data plane doesn't come up
 // even though the handshake completed). A validated tunnel is essential for the
 // refresher: swapping the proxy onto a dead tunnel would break every connection.
+//
+// Validation covers recently-used destinations, not just the DNS server: a new
+// session's route to internal (172.16.x) services can lag its route to DNS by
+// several seconds, and swapping during that gap turns every user request into a
+// timeout. Early attempts therefore require a recent destination to answer;
+// the final attempt relaxes to DNS-only so a service that is genuinely down
+// can't block rotation forever.
 func (m *Manager) buildLiveTunnel(ctx context.Context) (*corplink.NetstackDevice, *corplink.WgConf, *corplink.VPNInfo, error) {
+	recentAddrs := m.recentProxyDials()
 	var lastErr error
 	for attempt := 0; attempt < tunnelBuildAttempts; attempt++ {
 		device, wgConf, node, err := m.buildTunnel(ctx, "")
 		if err != nil {
 			return nil, nil, nil, err // build/handshake errors are not transient here
 		}
-		probeAddr := tunnelProbeAddr(wgConf)
+		strict := attempt < tunnelBuildAttempts-1
 		pctx, cancel := context.WithTimeout(ctx, tunnelProbeTimeout)
-		err = device.Probe(pctx, probeAddr)
+		err = probeTunnel(pctx, device, tunnelProbeAddr(wgConf), recentAddrs, strict)
 		cancel()
 		if err == nil {
 			return device, wgConf, node, nil
@@ -178,6 +186,23 @@ func (m *Manager) buildLiveTunnel(ctx context.Context) (*corplink.NetstackDevice
 	return nil, nil, nil, lastErr
 }
 
+// recentProxyDials returns destinations users recently reached through the live
+// proxy, for route-convergence probing of candidate tunnels. Empty when no
+// proxy is running or nothing was dialed recently.
+func (m *Manager) recentProxyDials() []string {
+	m.mu.Lock()
+	proxy := m.proxy
+	m.mu.Unlock()
+	if proxy == nil {
+		return nil
+	}
+	return proxy.RecentDialAddrs(recentProbeAddrs)
+}
+
+// recentProbeAddrs is how many recently-dialed destinations a candidate tunnel
+// is probed against; one answering suffices.
+const recentProbeAddrs = 3
+
 // tunnelProbeAddr picks an in-tunnel host:port to validate the data path against
 // — the tunnel's DNS server on port 53, which every CorpLink node routes.
 func tunnelProbeAddr(wgConf *corplink.WgConf) string {
@@ -190,7 +215,9 @@ func tunnelProbeAddr(wgConf *corplink.WgConf) string {
 
 const (
 	tunnelBuildAttempts = 4
-	tunnelProbeTimeout  = 5 * time.Second
+	// Window for one probeTunnel pass: DNS plus up to recentProbeAddrs
+	// destinations at probeEachTimeout each.
+	tunnelProbeTimeout = 8 * time.Second
 )
 
 // resetTunnelStatsLocked zeroes the per-tunnel sampling baselines. Caller holds m.mu.
@@ -418,10 +445,12 @@ func (m *Manager) refreshTunnel(ctx context.Context) error {
 
 	log.Printf("tunnel refreshed: new session on %s (%s)", node.EnName, wgConf.Address)
 
-	// Drain the old tunnel briefly so connections dialed on it can finish, then
-	// close it. Report its disconnect best-effort so the node frees the session.
+	// Drain the old tunnel until connections dialed on it finish (a large asset
+	// download can easily outlive a fixed grace), then close it. Capped so a
+	// wedged connection can't leak devices. Report its disconnect best-effort so
+	// the node frees the session.
 	go func(dev *corplink.NetstackDevice, addr string) {
-		time.Sleep(tunnelDrainAfter)
+		waitDrained(dev, tunnelDrainAfter, tunnelDrainMax, time.Second)
 		if addr != "" {
 			_ = m.client.ReportDevice(context.Background(), addr, mode, true)
 		}
@@ -430,9 +459,28 @@ func (m *Manager) refreshTunnel(ctx context.Context) error {
 	return nil
 }
 
-// tunnelDrainAfter is how long the previous tunnel is kept alive after a refresh
-// swap so connections still relaying on it can drain before it is closed.
+// tunnelDrainAfter is the minimum time the previous tunnel is kept alive after
+// a refresh swap; beyond it the tunnel is held only while proxied connections
+// remain open on it, up to tunnelDrainMax.
 const tunnelDrainAfter = 10 * time.Second
+
+// tunnelDrainMax caps how long a retiring tunnel can be held open by in-flight
+// connections before it is closed regardless (bounds device leakage; the
+// gateway will have cut its session long before this anyway).
+const tunnelDrainMax = 90 * time.Second
+
+// connCounter is the slice of NetstackDevice the drain logic needs.
+type connCounter interface{ ActiveConns() int64 }
+
+// waitDrained blocks for at least min, then keeps waiting (polling every step)
+// while dev still has open proxied connections, up to max total.
+func waitDrained(dev connCounter, min, max, step time.Duration) {
+	deadline := time.Now().Add(max)
+	time.Sleep(min)
+	for dev.ActiveConns() > 0 && time.Now().Before(deadline) {
+		time.Sleep(step)
+	}
+}
 
 // minRefreshInterval coalesces refreshes triggered close together (periodic
 // timer + stall detector) so we don't build tunnels back-to-back.
@@ -591,13 +639,52 @@ func (m *Manager) reconnect() {
 	log.Printf("wireguard handshake stale; reconnecting tunnel")
 	m.teardown()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := m.connectReal(ctx, ""); err != nil {
+	// Retry transient failures: the control API often hiccups (EOF, timeout)
+	// exactly when the data path is churning, and giving up on the first
+	// failure drops the proxy listener — a total outage until the user
+	// manually reconnects. Only a logged-out session is fatal.
+	err := retryReconnect(context.Background(), reconnectAttempts, reconnectRetryDelay,
+		func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			return m.connectReal(ctx, "")
+		},
+		corplink.IsLoggedOut,
+	)
+	if err != nil {
 		log.Printf("wireguard reconnect failed: %v", err)
 		m.setState(StateLoggedIn, "reconnect failed: "+err.Error())
 		m.teardown()
 	}
+}
+
+const (
+	reconnectAttempts   = 5
+	reconnectRetryDelay = 5 * time.Second
+)
+
+// retryReconnect runs connect up to attempts times, sleeping delay between
+// failures, stopping early on success, context cancellation, or a fatal error.
+func retryReconnect(ctx context.Context, attempts int, delay time.Duration, connect func() error, fatal func(error) bool) error {
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return lastErr
+			case <-time.After(delay):
+			}
+		}
+		lastErr = connect()
+		if lastErr == nil {
+			return nil
+		}
+		if fatal(lastErr) {
+			return lastErr
+		}
+		log.Printf("reconnect attempt %d/%d failed: %v", i+1, attempts, lastErr)
+	}
+	return lastErr
 }
 
 func routeModeReport(mode string) string {

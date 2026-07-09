@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,9 +18,30 @@ import (
 const (
 	dnsCacheTTL      = 5 * time.Minute
 	dnsLookupRetries = 4
-	proxyDialTimeout = 15 * time.Second
 	proxyCopyBufSize = 256 << 10
 )
+
+// Dial timing knobs. Package-level vars (not consts) so tests can shrink them.
+// The overall budget spans multiple attempts: a dial that lands in the dead
+// window between a gateway data-path cutoff and the refresher's tunnel swap
+// fails its attempt quickly and retries on the freshly-swapped tunnel, instead
+// of burning the whole budget hanging on the dead one.
+var (
+	// The overall budget must exceed one full refresher rotation (18s) plus
+	// tunnel build time, so a request that spends its early attempts on a dead
+	// tunnel is guaranteed at least one attempt on the next freshly-probed one.
+	proxyDialTimeout        = 25 * time.Second       // overall per-request budget
+	proxyDialAttemptTimeout = 5 * time.Second        // per-attempt (DNS + connect)
+	dialRetryDelay          = 500 * time.Millisecond // pause before retrying the same tunnel
+
+	// recentDialTTL bounds how long a successfully-dialed destination is
+	// considered representative of live user demand for tunnel-probe purposes.
+	recentDialTTL = 10 * time.Minute
+)
+
+// recentDialCap bounds the tracked destination list; only the few most recent
+// are ever probed, so a small cap suffices.
+const recentDialCap = 8
 
 var proxyCopyBufferPool = sync.Pool{
 	New: func() any {
@@ -62,6 +84,11 @@ type MixedProxy struct {
 	tunMu    sync.RWMutex
 	dialer   Dialer
 	resolver Resolver
+	// tunGen increments on every SetTunnel; tunSwapped is closed (and replaced)
+	// at the same time so stalled requests can block until a fresh tunnel is in
+	// place instead of burning retries on a generation that already failed.
+	tunGen     uint64
+	tunSwapped chan struct{}
 
 	auth *ProxyAuth
 
@@ -69,14 +96,31 @@ type MixedProxy struct {
 	dnsCache map[string]dnsCacheEntry
 	dnsCalls map[string]*dnsLookupCall
 
+	// recentMu guards recentDials: destinations (ip:port) recently dialed
+	// successfully through the tunnel, most-recent-first. The refresher probes
+	// these on a candidate tunnel so a swap only happens onto a tunnel that can
+	// reach what users are actually using — the DNS-server probe alone can pass
+	// while the gateway's internal routes are still converging.
+	recentMu    sync.Mutex
+	recentDials []recentDial
+
 	ln     net.Listener
 	closed chan struct{}
 	once   sync.Once
+
+	// assets caches complete immutable (content-hashed) static assets so
+	// repeat page loads don't depend on tunnel health at all.
+	assets *assetCache
 }
 
 type dnsCacheEntry struct {
 	addrs   []string
 	expires time.Time
+}
+
+type recentDial struct {
+	addr string // ip:port
+	at   time.Time
 }
 
 type dnsLookupCall struct {
@@ -89,12 +133,14 @@ type dnsLookupCall struct {
 func NewMixedProxy(dialer Dialer, auth *ProxyAuth) *MixedProxy {
 	resolver, _ := dialer.(Resolver)
 	return &MixedProxy{
-		dialer:   dialer,
-		resolver: resolver,
-		auth:     auth,
-		dnsCache: make(map[string]dnsCacheEntry),
-		dnsCalls: make(map[string]*dnsLookupCall),
-		closed:   make(chan struct{}),
+		dialer:     dialer,
+		resolver:   resolver,
+		tunSwapped: make(chan struct{}),
+		auth:       auth,
+		dnsCache:   make(map[string]dnsCacheEntry),
+		dnsCalls:   make(map[string]*dnsLookupCall),
+		closed:     make(chan struct{}),
+		assets:     newAssetCache(assetCacheBudget),
 	}
 }
 
@@ -106,7 +152,35 @@ func (p *MixedProxy) SetTunnel(dialer Dialer, resolver Resolver) {
 	p.tunMu.Lock()
 	p.dialer = dialer
 	p.resolver = resolver
+	p.tunGen++
+	close(p.tunSwapped)
+	p.tunSwapped = make(chan struct{})
 	p.tunMu.Unlock()
+}
+
+// tunnelGen returns the current tunnel generation and a channel that is closed
+// when the next SetTunnel happens.
+func (p *MixedProxy) tunnelGen() (uint64, <-chan struct{}) {
+	p.tunMu.RLock()
+	defer p.tunMu.RUnlock()
+	return p.tunGen, p.tunSwapped
+}
+
+// waitTunnelSwap blocks until the tunnel generation advances past gen, or
+// until timeout/proxy close. Returns true if a swap happened.
+func (p *MixedProxy) waitTunnelSwap(gen uint64, timeout time.Duration) bool {
+	cur, swapped := p.tunnelGen()
+	if cur != gen {
+		return true
+	}
+	select {
+	case <-swapped:
+		return true
+	case <-time.After(timeout):
+		return false
+	case <-p.closed:
+		return false
+	}
 }
 
 // tunnel returns the currently active dialer/resolver under the read lock.
@@ -246,9 +320,59 @@ func (p *MixedProxy) handleSocks5(client net.Conn, br *bufio.Reader) {
 	relay(client, upstream, br)
 }
 
+// dialContext dials host:port through the active tunnel, retrying with a fresh
+// tunnel snapshot when an attempt times out. A request that lands in the dead
+// window of a tunnel rotation (gateway cut the data path; refresher hasn't
+// swapped yet) hangs its first attempt; capping each attempt at
+// proxyDialAttemptTimeout and re-snapshotting the tunnel lets the retry ride
+// the freshly-swapped tunnel instead of returning 502 after the full budget.
 func (p *MixedProxy) dialContext(ctx context.Context, network, host, port string) (net.Conn, error) {
-	// Snapshot the active tunnel once so a mid-dial refresh swap stays consistent
-	// for this connection.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, proxyDialTimeout)
+		defer cancel()
+	}
+
+	var lastErr error
+	for {
+		conn, err := p.dialOnce(ctx, network, host, port)
+		if err == nil {
+			// Record the destination IP as live demand for refresh probing. For
+			// hostname dials the conn's remote addr carries the resolved IP.
+			if net.ParseIP(host) != nil {
+				p.recordRecentDial(net.JoinHostPort(host, port))
+			} else if remote := conn.RemoteAddr(); remote != nil {
+				p.recordRecentDial(remote.String())
+			}
+			return conn, nil
+		}
+		if ctx.Err() != nil {
+			// overall budget exhausted; report the most informative error
+			if lastErr != nil && !errors.Is(err, context.DeadlineExceeded) {
+				return nil, err
+			}
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, err
+		}
+		if !isRetryableDialError(err) {
+			return nil, err
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return nil, lastErr
+		case <-time.After(dialRetryDelay):
+		}
+	}
+}
+
+// dialOnce performs a single dial attempt (in-tunnel DNS + connect) against the
+// currently active tunnel, bounded by proxyDialAttemptTimeout.
+func (p *MixedProxy) dialOnce(ctx context.Context, network, host, port string) (net.Conn, error) {
+	// Snapshot the active tunnel per attempt so a mid-request refresh swap is
+	// picked up by the next attempt.
 	dialer, resolver := p.tunnel()
 
 	// Record outbound demand at the entry point — before in-tunnel DNS and the
@@ -259,23 +383,20 @@ func (p *MixedProxy) dialContext(ctx context.Context, network, host, port string
 		m.MarkDialActivity()
 	}
 
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, proxyDialTimeout)
-		defer cancel()
-	}
+	actx, cancel := context.WithTimeout(ctx, proxyDialAttemptTimeout)
+	defer cancel()
 
 	if net.ParseIP(host) != nil || resolver == nil {
-		return dialer.DialContext(ctx, network, net.JoinHostPort(host, port))
+		return dialer.DialContext(actx, network, net.JoinHostPort(host, port))
 	}
 
-	addrs, err := p.lookupHost(ctx, resolver, host)
+	addrs, err := p.lookupHost(actx, resolver, host)
 	if err != nil {
 		return nil, err
 	}
 	var lastErr error
 	for _, addr := range addrs {
-		upstream, err := dialer.DialContext(ctx, network, net.JoinHostPort(addr, port))
+		upstream, err := dialer.DialContext(actx, network, net.JoinHostPort(addr, port))
 		if err == nil {
 			return upstream, nil
 		}
@@ -285,6 +406,65 @@ func (p *MixedProxy) dialContext(ctx context.Context, network, host, port string
 		return nil, lastErr
 	}
 	return nil, &net.DNSError{Err: "no addresses found", Name: host}
+}
+
+// recordRecentDial remembers a successfully-dialed destination (ip:port) as
+// live user demand, deduplicated and most-recent-first. Addresses that don't
+// parse as host:port (e.g. synthetic test conns) are skipped.
+func (p *MixedProxy) recordRecentDial(addr string) {
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		return
+	}
+	now := time.Now()
+	p.recentMu.Lock()
+	defer p.recentMu.Unlock()
+	out := make([]recentDial, 0, len(p.recentDials)+1)
+	out = append(out, recentDial{addr: addr, at: now})
+	for _, d := range p.recentDials {
+		if d.addr == addr || now.Sub(d.at) > recentDialTTL || len(out) >= recentDialCap {
+			continue
+		}
+		out = append(out, d)
+	}
+	p.recentDials = out
+}
+
+// RecentDialAddrs returns up to max destinations (ip:port) that were dialed
+// successfully through the tunnel within recentDialTTL, most-recent-first.
+func (p *MixedProxy) RecentDialAddrs(max int) []string {
+	now := time.Now()
+	p.recentMu.Lock()
+	defer p.recentMu.Unlock()
+	var out []string
+	for _, d := range p.recentDials {
+		if now.Sub(d.at) > recentDialTTL {
+			continue
+		}
+		out = append(out, d.addr)
+		if len(out) >= max {
+			break
+		}
+	}
+	return out
+}
+
+// isRetryableDialError reports whether a failed attempt is the signature of a
+// dead/rotating tunnel (worth retrying on a fresh tunnel snapshot) rather than
+// a definitive answer from a live network (refused, unreachable, DNS NXDOMAIN).
+func isRetryableDialError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsTimeout {
+		return true
+	}
+	// gVisor netstack surfaces a mid-dial device teardown (refresher closing the
+	// old tunnel while our SYN was in flight) as "operation aborted".
+	if strings.Contains(err.Error(), "operation aborted") {
+		return true
+	}
+	return false
 }
 
 func (p *MixedProxy) lookupHost(ctx context.Context, resolver Resolver, host string) ([]string, error) {

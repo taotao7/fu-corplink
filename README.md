@@ -130,10 +130,12 @@ POST /api/disconnect     → Manager.Disconnect  上报断开 + teardown
 
 ## 隧道自愈机制
 
-飞连网关有两类会悄悄打断连接的行为，普通的 WireGuard 存活检查看不出来。fu-corplink 用三重手段应对，目标是**代理连接零感知**：
+飞连网关有两类会悄悄打断连接的行为，普通的 WireGuard 存活检查看不出来。fu-corplink 用多重手段应对，目标是**代理连接零感知**：
 
 **1. 主动刷新（make-before-break，`runRefresher`）**
 部分飞连网关强制一个"客户端完整性心跳"——官方客户端每隔几秒上报一个加密报文，网关看不到它就会在连接约 60s 后静默切断数据面（`/vpn/report` 回 `{"code":1000,"action":"alert"}`）。我们无法伪造该私有心跳，于是**在旧隧道到期前**（默认 18s）后台**建一条全新隧道**（新 session、新的切断预算），先探测其数据面可用，再把代理**原子热切换**过去，旧隧道 drain 10s 后关闭。整个过程监听端口不断、在途连接不掉。
+
+刷新换上的新隧道必须先通过**双重数据面探测**：除了隧道内 DNS（`223.5.5.5:53`），还要能连通**用户最近实际访问过的内网目标**之一——新 session 有时能通 DNS 但到内网网段（如 `172.16.x`）的路由要再过几秒才收敛，只探 DNS 会把代理切到一条"半通"的隧道上。前几次构建尝试严格要求内网目标可达，最后一次放宽为仅 DNS，避免内网服务真宕机时卡死轮换。
 
 **2. 死亡检测（双信号，`runHandshakeWatch`）**
 每 5s 判断当前隧道是否已死：
@@ -141,10 +143,22 @@ POST /api/disconnect     → Manager.Disconnect  上报断开 + teardown
 - **带负载假存活（RX stall）** —— 有真实出站需求（app 级发送字节增长 **或** 代理发起了 dial），但 20s 内无任何真实入站字节。这是"网关照常回握手却丢光数据包"的签名，只看握手永远发现不了。
 命中任一信号就优先走 make-before-break 刷新；刷新本身失败才回退到硬重连（`reconnect`）。
 
-**3. 只看应用级流量，绝不误伤空闲隧道**
+**3. 代理拨号自动骑上新隧道（dial retry）**
+落在"旧隧道已死、新隧道未换上"死窗口里的代理请求不会直接吃 502：每次拨号尝试限时 5s，失败特征像死隧道（超时 / `operation aborted`）就等 500ms 重新快照当前隧道再试，直到总预算 25s 用完——预算刻意大于一个完整刷新周期（18s），保证请求至少能在下一条已验证的新隧道上试一次。明确错误（如 connection refused）不重试、立即返回。
+
+**4. HTTP 转发断点续传（forward resume）**
+普通 HTTP 转发（非 CONNECT）按请求逐个拨号（绝不复用可能已死的隧道连接），响应体 6s 无进展即判定"会话被网关中途吊销"，换新隧道用 `Range` 续传拼接，客户端看到的是一条无缝完整响应。重试预算按"连续零进展次数"计（推进就重置），且每次重试会等刷新器换上**新一代**隧道再动手，不在已证死的隧道上浪费尝试。只有幂等请求（GET/HEAD 且无调用方 Range）参与续传。
+
+**5. 不可变资产缓存（immutable asset cache）**
+内容哈希命名的静态资产（Vite/webpack 的 `name-HASH.js` 等）天然不可变，完整中转成功一次后进入 64MiB LRU 内存缓存，之后的重复加载**完全不经过隧道**、毫秒级返回——页面刷新从此与隧道抖动解耦。被打断的传输前缀也会跨请求累积（浏览器重试从上次进度继续，而不是从零开始）。只缓存完整走完的 200 响应，动态路径永不缓存。
+
+**6. 断线自动重连（reconnect retry）**
+刷新失败回退硬重连时，控制面 API 的瞬时故障（EOF / 超时——往往恰好发生在数据面抖动时）会以 5s 间隔重试最多 5 次，而不是首败即放弃把整个代理打回 logged_in；只有会话真正失效（logged out）才立即停止并提示重新登录。
+
+**7. 只看应用级流量，绝不误伤空闲隧道**
 所有需求/停顿判断都基于 `countingConn` 的**应用级**字节和 dial 尝试，**不看** WireGuard 线级计数——因为 keepalive 会让线级字节永远增长。空闲隧道没有出站需求，任何自愈路径都不会动它。
 
-> 相关常量集中在 `vpnmgr/manager.go` 和 `vpnmgr/connect.go`：`handshakeStaleAfter=210s`、`rxStallAfter=20s`、`tunnelRefreshAfter=18s`、`tunnelDrainAfter=10s`、`minRefreshInterval=8s`。判定逻辑抽成纯函数 `reconnectReason`，有单元测试覆盖。
+> 相关常量集中在 `vpnmgr/manager.go`、`vpnmgr/connect.go`、`corplink/proxy.go` 和 `corplink/proxy_http.go`：`handshakeStaleAfter=210s`、`rxStallAfter=20s`、`tunnelRefreshAfter=18s`、`tunnelDrainAfter=10s`（按在途连接引用计数最长扩到 90s）、`minRefreshInterval=8s`、`proxyDialTimeout=25s`、`proxyDialAttemptTimeout=5s`、`forwardStallTimeout=6s`、`forwardSwapWait=30s`、`assetCacheBudget=64MiB`。判定逻辑抽成纯函数（`reconnectReason`、`probeTunnel`、`isRetryableDialError`、`isImmutableAssetPath`、`retryReconnect`），有单元测试覆盖。
 
 ---
 
@@ -168,6 +182,8 @@ go build -trimpath -o corplink-web ./cmd/corplink-web
 ```
 
 启动后打开 <http://127.0.0.1:6151>。想让局域网访问就换成 `--listen 0.0.0.0:6151`（注意先看[安全提示](#安全提示)）。
+
+> ⚠️ **本机开着 Stash / Clash / Surge 等代理软件（TUN 模式）？** 先按 [与系统级 TUN VPN 共存](#与系统级-tun-vpn-共存stash--clash--surge-等) 一节配置上游代理再点连接，否则连接会时通时断。
 
 如需修改并重建前端（Node >= 20）：
 
@@ -194,6 +210,8 @@ docker run -d --name fu-corplink \
 ```
 
 容器默认执行 `corplink-web --listen 0.0.0.0:6151 /etc/corplink/config.json`，首次启动会在挂载卷里自动生成 `config.json`（含 `device_id`、Android 设备信息、WireGuard keypair）；登录会话 cookie 也保存在同目录。
+
+> ⚠️ **本机开着 Stash / Clash / Surge 等代理软件（TUN 模式）？** 直接启动后连接会时通时断（表现为握手失败、连上后很快断流）。这不是 bug，是两个 VPN 在抢整机路由——启动后先按 [与系统级 TUN VPN 共存](#与系统级-tun-vpn-共存stash--clash--surge-等) 一节配置上游代理再点连接。
 
 Docker Compose：
 
@@ -309,16 +327,64 @@ curl --proxy http://127.0.0.1:8989 http://example.com
 
 fu-corplink 用用户态 WireGuard，自身不建 TUN、不动系统路由表。但当**系统级 TUN VPN**开启时，它会用 `0.0.0.0/1` + `128.0.0.0/1` 这种比默认路由更具体的路由把**整机出站**（包括 fu-corplink 自己的飞连 API 请求和 WireGuard 传输）都收进 TUN，于是 fu-corplink 的握手被 TUN VPN 的规则左右、时而失效；反过来 fu-corplink 的流量也可能干扰 TUN VPN。典型表现："开了 corplink 后 git/内网走不通，关了又好"。
 
-解决办法是把 fu-corplink 的出站交给那个 TUN VPN 的**混合代理端口**（它对代理客户端的流量会按规则走真实接口，而不进自己的 TUN 抓取）：
+解决办法是把 fu-corplink 的出站交给那个 TUN VPN 的**混合代理端口**（它对代理客户端的流量会按规则走真实接口，而不进自己的 TUN 抓取）。
 
-1. 在 TUN VPN 客户端里确认其 HTTP/SOCKS5 混合端口（Stash 默认 `7890`）。
-2. 在 fu-corplink"设置 → 上游代理 (`upstream_proxy`)"里填该地址：
-   - 本机直跑：`http://127.0.0.1:7890`
-   - Docker 里跑（访问宿主机）：`http://host.docker.internal:7890`
-   - 也可写 `socks5://...`
-3. 把"WireGuard 协议"设为**强制 TCP**（UDP 无法走 HTTP 代理；SOCKS5 UDP ASSOCIATE 多数消费级客户端不支持）。
+### 第一步：确认代理软件的混合端口
 
-设置后 fu-corplink 的 API 调用、节点探测、WireGuard 隧道都从该代理出去，与 TUN VPN 互不抢占。留空恢复直连（默认）。
+在你的代理软件里找到 HTTP/SOCKS5 混合监听端口，并**确保"允许局域网连接 (Allow LAN)"已打开**（Docker 方式运行时容器是从虚拟网卡访问宿主机的，只监听 127.0.0.1 会连不上）：
+
+| 软件 | 默认混合端口 | 备注 |
+| --- | --- | --- |
+| Stash | `7890` | 设置 → HTTP 端口 |
+| Clash / Clash Verge / mihomo | `7890`（或 `mixed-port` 配置值） | 打开 Allow LAN |
+| Surge | `6152`（HTTP）/ `6153`（SOCKS5） | 设置 → HTTP 监听地址 |
+| V2rayN / V2rayA | `10809`（HTTP）/ `10808`（SOCKS5） | 以实际配置为准 |
+
+### 第二步：配置 fu-corplink 上游代理
+
+**方式 A：Web 控制台（推荐）** —— 打开控制台 → 设置：
+
+1. **上游代理 (`upstream_proxy`)** 填：
+   - 源码直跑：`http://127.0.0.1:7890`
+   - Docker 运行：`http://host.docker.internal:7890`（Docker Desktop / OrbStack 内置该域名；Linux 原生 Docker 见下）
+   - SOCKS5 也可以：`socks5://127.0.0.1:7890`
+2. **WireGuard 协议 (`force_protocol`)** 选 **强制 TCP**（UDP 无法走 HTTP 代理；SOCKS5 UDP ASSOCIATE 多数消费级客户端不支持）。
+3. 保存后（重新）点连接。
+
+**方式 B：直接改 `config.json`**（改完重启服务）：
+
+```jsonc
+{
+  // ... 其余字段保持自动生成的值 ...
+  "upstream_proxy": "http://host.docker.internal:7890",  // 源码直跑用 http://127.0.0.1:7890
+  "force_protocol": "tcp"
+}
+```
+
+**Linux 原生 Docker** 没有 `host.docker.internal`，启动容器时加一行映射即可：
+
+```bash
+docker run -d --name fu-corplink \
+  --add-host host.docker.internal:host-gateway \
+  -p 6151:6151 \
+  -p 8989:8989 \
+  -v fu-corplink-data:/etc/corplink \
+  fu-corplink:dev
+```
+
+（Docker Compose 里等价写法是在服务下加 `extra_hosts: ["host.docker.internal:host-gateway"]`。）
+
+### 第三步：验证
+
+连接成功后，通过 fu-corplink 的代理访问一个内网地址：
+
+```bash
+curl --proxy http://127.0.0.1:8989 http://<某内网服务>/ -m 10 -o /dev/null -w '%{http_code}\n'
+```
+
+返回业务状态码（如 `200` / `302`）即为打通。若返回 `502`，查看服务日志里的 `dial ... failed`；若日志出现 `transport conn ... 7890: connection refused`，说明上游代理端口没通（回到第一步检查 Allow LAN / 端口号）。
+
+设置后 fu-corplink 的 API 调用、节点探测、WireGuard 隧道都从该代理出去，与 TUN VPN 互不抢占。`upstream_proxy` 留空则恢复直连（默认，适合没开代理软件的环境）。
 
 ---
 
