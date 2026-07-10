@@ -213,24 +213,18 @@ docker run -d --name fu-corplink \
 
 > ⚠️ **本机开着 Stash / Clash / Surge 等代理软件（TUN 模式）？** 直接启动后连接会时通时断（表现为握手失败、连上后很快断流）。这不是 bug，是两个 VPN 在抢整机路由——启动后先按 [与系统级 TUN VPN 共存](#与系统级-tun-vpn-共存stash--clash--surge-等) 一节配置上游代理再点连接。
 
-Docker Compose：
+**Docker Compose（推荐）**：仓库根目录自带 [`docker-compose.yml`](docker-compose.yml)，克隆后直接：
 
-```yaml
-services:
-  corplink-web:
-    build: .                # 本地构建；如已推送镜像可改成 image: <your-image>
-    restart: unless-stopped
-    ports:
-      - "6151:6151" # Web 控制台
-      - "8989:8989" # HTTP / SOCKS5 混合代理
-    volumes:
-      - corplink-web-data:/etc/corplink
+```bash
+git clone https://github.com/taotao7/fu-corplink.git
+cd fu-corplink
 
-volumes:
-  corplink-web-data:
+docker compose up -d --build     # 本地构建镜像并后台启动
 ```
 
-`docker compose up -d --build` 即可启动。
+首次启动会在数据卷 `fu-corplink-data` 里自动生成 `config.json` 和会话 cookie；容器随 Docker 自动重启（`restart: unless-stopped`）。查看日志用 `docker compose logs -f`，停止用 `docker compose down`（数据卷保留，下次 `up` 复用登录态）。
+
+compose 已内置 `extra_hosts: host.docker.internal:host-gateway`，Linux 原生 Docker 也能访问宿主机上的系统级代理（配合下方“与系统级 TUN VPN 共存”一节的 `upstream_proxy`）。
 
 ### 前端热更新开发
 

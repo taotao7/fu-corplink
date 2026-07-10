@@ -1,0 +1,26 @@
+# fu-corplink —— 本地构建并运行（`docker compose up -d --build`）
+#
+# 首次启动会在数据卷里自动生成 config.json（device_id / Android 设备信息 /
+# WireGuard keypair），登录会话 cookie 也保存在同目录。随后打开
+# http://localhost:6151 输入企业代号并登录即可。
+services:
+  corplink-web:
+    build: .                       # 本地构建；如已推送镜像可改成 image: <your-image>
+    image: fu-corplink:dev
+    container_name: fu-corplink
+    restart: unless-stopped
+    ports:
+      - "6151:6151"                # Web 控制台
+      - "8989:8989"                # HTTP / SOCKS5 混合代理
+    # 让容器能访问宿主机上的系统级代理（Stash / Clash / Surge 的 HTTP 端口）。
+    # Docker Desktop / OrbStack 内置 host.docker.internal，这行是给 Linux 原生
+    # Docker 补上的，写着对所有平台都无害。配合 config.json 里的
+    # upstream_proxy: http://host.docker.internal:7890 使用。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - fu-corplink-data:/etc/corplink
+
+volumes:
+  fu-corplink-data:
+    name: fu-corplink-data         # 固定卷名：复用已有配置，全新环境则自动创建
