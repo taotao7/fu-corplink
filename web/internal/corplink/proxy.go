@@ -32,9 +32,12 @@ var (
 	// tunnel is guaranteed at least one attempt on the next freshly-probed one.
 	// Generous because the tunnel is low-throughput (~tens of KB/s): a browser
 	// fanning out a dozen parallel asset requests congests it enough that
-	// in-tunnel DNS + TCP connect for later dials can take well over 5s.
+	// in-tunnel DNS + TCP connect for later dials can take several seconds.
+	// The per-attempt bound stays well under one rotation period: an attempt
+	// hung on a dead-window tunnel should fail (and kick the refresher) fast,
+	// not pin the request to that generation while fresh tunnels come and go.
 	proxyDialTimeout        = 60 * time.Second       // overall per-request budget
-	proxyDialAttemptTimeout = 15 * time.Second       // per-attempt (DNS + connect)
+	proxyDialAttemptTimeout = 8 * time.Second        // per-attempt (DNS + connect)
 	dialRetryDelay          = 500 * time.Millisecond // pause before retrying the same tunnel
 
 	// recentDialTTL bounds how long a successfully-dialed destination is
@@ -96,8 +99,13 @@ type MixedProxy struct {
 	// refreshKick is a capacity-1 signal to the tunnel refresher: a proxied
 	// request just proved the current tunnel dead (stall/dial timeout), so
 	// rotate now instead of waiting out the periodic timer. Nil when no
-	// refresher is subscribed.
+	// refresher is subscribed. lastKickGen dedupes kicks per tunnel
+	// generation: one failed request per generation is enough evidence, and
+	// unbounded kicking under sustained load thrashes rotations — each fresh
+	// tunnel has a routes-converging birth window, so rotating faster than
+	// the gateway requires *creates* dead windows instead of escaping them.
 	refreshKick chan struct{}
+	lastKickGen uint64
 
 	auth *ProxyAuth
 
@@ -112,6 +120,15 @@ type MixedProxy struct {
 	// while the gateway's internal routes are still converging.
 	recentMu    sync.Mutex
 	recentDials []recentDial
+
+	// liveHosts records hostnames that dialed successfully recently. Used to
+	// gate refresh kicks: only a failure against a proven-reachable host is
+	// evidence the tunnel died. Without this, perpetually-unreachable
+	// destinations (e.g. macOS connectivity probes to www.apple.com leaking
+	// into the proxy) kick a rotation every failure cycle, doubling the
+	// rotation rate and with it the number of dead windows.
+	liveMu    sync.Mutex
+	liveHosts map[string]time.Time
 
 	ln     net.Listener
 	closed chan struct{}
@@ -150,7 +167,31 @@ func NewMixedProxy(dialer Dialer, auth *ProxyAuth) *MixedProxy {
 		dnsCalls:   make(map[string]*dnsLookupCall),
 		closed:     make(chan struct{}),
 		assets:     newAssetCache(assetCacheBudget),
+		liveHosts:  make(map[string]time.Time),
 	}
+}
+
+// markHostLive records a successful dial to host, making later failures
+// against it eligible to kick a tunnel refresh.
+func (p *MixedProxy) markHostLive(host string) {
+	p.liveMu.Lock()
+	p.liveHosts[host] = time.Now()
+	if len(p.liveHosts) > 256 { // bound the map; stale entries expire on read
+		for h, at := range p.liveHosts {
+			if time.Since(at) > recentDialTTL {
+				delete(p.liveHosts, h)
+			}
+		}
+	}
+	p.liveMu.Unlock()
+}
+
+// hostWasLive reports whether host dialed successfully within recentDialTTL.
+func (p *MixedProxy) hostWasLive(host string) bool {
+	p.liveMu.Lock()
+	at, ok := p.liveHosts[host]
+	p.liveMu.Unlock()
+	return ok && time.Since(at) <= recentDialTTL
 }
 
 // SetTunnel atomically swaps the dialer/resolver the proxy dials through, so a
@@ -189,14 +230,19 @@ func (p *MixedProxy) RefreshKick() <-chan struct{} {
 }
 
 // kickRefresh signals the refresher (non-blocking) that the current tunnel
-// generation has been proven dead by real traffic.
+// generation has been proven dead by real traffic. At most one kick fires per
+// tunnel generation: once a rotation is on its way, further failures on the
+// same dying tunnel add no information, and kicking every fresh generation
+// under sustained load would rotate faster than tunnels can stabilize.
 func (p *MixedProxy) kickRefresh() {
-	p.tunMu.RLock()
+	p.tunMu.Lock()
 	ch := p.refreshKick
-	p.tunMu.RUnlock()
-	if ch == nil {
+	if ch == nil || p.lastKickGen == p.tunGen {
+		p.tunMu.Unlock()
 		return
 	}
+	p.lastKickGen = p.tunGen
+	p.tunMu.Unlock()
 	select {
 	case ch <- struct{}{}:
 	default: // a kick is already pending
@@ -381,6 +427,7 @@ func (p *MixedProxy) dialContext(ctx context.Context, network, host, port string
 			} else if remote := conn.RemoteAddr(); remote != nil {
 				p.recordRecentDial(remote.String())
 			}
+			p.markHostLive(host)
 			return conn, nil
 		}
 		if ctx.Err() != nil {
@@ -396,10 +443,15 @@ func (p *MixedProxy) dialContext(ctx context.Context, network, host, port string
 		if !isRetryableDialError(err) {
 			return nil, err
 		}
-		// A timed-out attempt is the signature of a dead-window tunnel: tell
-		// the refresher to rotate now rather than letting this request burn
-		// its whole budget waiting for the periodic timer.
-		p.kickRefresh()
+		// A timed-out attempt against a host that recently dialed fine is the
+		// signature of a dead-window tunnel: tell the refresher to rotate now
+		// rather than letting this request burn its whole budget waiting for
+		// the periodic timer. Hosts with no recent success don't qualify —
+		// they may simply be unreachable (e.g. OS connectivity probes leaking
+		// into the proxy), and kicking on those would thrash rotations.
+		if p.hostWasLive(host) {
+			p.kickRefresh()
+		}
 		lastErr = err
 		select {
 		case <-ctx.Done():

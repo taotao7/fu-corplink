@@ -318,7 +318,13 @@ func (p *MixedProxy) handleForward(client net.Conn, br *bufio.Reader, req *http.
 			// The tunnel generation this attempt used already proved dead —
 			// kick the refresher to rotate now (instead of waiting out the
 			// periodic timer) and block until the fresh tunnel is in place.
-			p.kickRefresh()
+			// Gated on evidence the destination itself works (bytes already
+			// relayed, or a recent successful dial to the host), so a
+			// perpetually-unreachable destination (e.g. OS connectivity
+			// probes leaking into the proxy) can't thrash the rotation cadence.
+			if st.relayed+int64(len(st.pending)) > 0 || p.hostWasLive(hostnameOnly(host)) {
+				p.kickRefresh()
+			}
 			p.waitTunnelSwap(gen, forwardSwapWait)
 		}
 	}
