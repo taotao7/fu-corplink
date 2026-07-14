@@ -465,9 +465,11 @@ func (m *Manager) refreshTunnel(ctx context.Context) error {
 const tunnelDrainAfter = 10 * time.Second
 
 // tunnelDrainMax caps how long a retiring tunnel can be held open by in-flight
-// connections before it is closed regardless (bounds device leakage; the
-// gateway will have cut its session long before this anyway).
-const tunnelDrainMax = 90 * time.Second
+// connections before it is closed regardless (bounds device leakage). Observed
+// tunnel throughput can be as low as ~5KB/s, so a large SPA bundle (~500KB+)
+// needs several minutes on one connection; 90s cut such downloads mid-stream
+// (browser sees ERR_INCOMPLETE_CHUNKED_ENCODING and the page white-screens).
+const tunnelDrainMax = 600 * time.Second
 
 // connCounter is the slice of NetstackDevice the drain logic needs.
 type connCounter interface{ ActiveConns() int64 }

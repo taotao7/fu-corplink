@@ -27,11 +27,14 @@ const (
 // fails its attempt quickly and retries on the freshly-swapped tunnel, instead
 // of burning the whole budget hanging on the dead one.
 var (
-	// The overall budget must exceed one full refresher rotation (18s) plus
-	// tunnel build time, so a request that spends its early attempts on a dead
+	// The overall budget must exceed one full refresher rotation plus tunnel
+	// build time, so a request that spends its early attempts on a dead
 	// tunnel is guaranteed at least one attempt on the next freshly-probed one.
-	proxyDialTimeout        = 25 * time.Second       // overall per-request budget
-	proxyDialAttemptTimeout = 5 * time.Second        // per-attempt (DNS + connect)
+	// Generous because the tunnel is low-throughput (~tens of KB/s): a browser
+	// fanning out a dozen parallel asset requests congests it enough that
+	// in-tunnel DNS + TCP connect for later dials can take well over 5s.
+	proxyDialTimeout        = 60 * time.Second       // overall per-request budget
+	proxyDialAttemptTimeout = 15 * time.Second       // per-attempt (DNS + connect)
 	dialRetryDelay          = 500 * time.Millisecond // pause before retrying the same tunnel
 
 	// recentDialTTL bounds how long a successfully-dialed destination is

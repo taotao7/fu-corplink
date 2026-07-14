@@ -206,8 +206,10 @@ func TestForwardResumeWhenRangeIgnored(t *testing.T) {
 	}
 }
 
-// Responses without Content-Length are delimited by connection close: the
-// proxy must relay the body and signal Connection: close to the client.
+// Responses without Content-Length (close-delimited/chunked origins) must be
+// reframed with an explicit Content-Length on a kept-alive connection: clients
+// behind CONNECT-tunneling upstreams (Stash/Clash) don't see the proxy's FIN,
+// so close-delimited framing would leave them waiting for EOF forever.
 func TestForwardUnknownLengthBody(t *testing.T) {
 	closeDelimited := func(conn net.Conn) {
 		br := bufio.NewReader(conn)
@@ -230,9 +232,11 @@ func TestForwardUnknownLengthBody(t *testing.T) {
 	if resp.StatusCode != 200 || string(body) != "stream-data" {
 		t.Fatalf("got %d %q", resp.StatusCode, string(body))
 	}
-	// Go's ReadResponse consumes "Connection: close" into resp.Close.
-	if !resp.Close {
-		t.Fatalf("expected close-delimited response (resp.Close=true)")
+	if resp.ContentLength != int64(len("stream-data")) {
+		t.Fatalf("expected reframed Content-Length %d, got %d", len("stream-data"), resp.ContentLength)
+	}
+	if resp.Close {
+		t.Fatalf("expected keep-alive response (resp.Close=false); close-delimited framing stalls CONNECT-tunneled clients")
 	}
 }
 

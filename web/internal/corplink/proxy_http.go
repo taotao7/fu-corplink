@@ -107,6 +107,31 @@ func (p *MixedProxy) handleConnect(client net.Conn, req *http.Request) {
 		_, _ = client.Write([]byte("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"))
 		return
 	}
+	// Plain-HTTP CONNECT tunnels (upstream proxies like Stash/Clash CONNECT
+	// even for port-80 traffic) carry parseable HTTP: interpose the forward
+	// machinery so inner requests get the same resume + immutable-asset cache
+	// treatment as direct forward-proxy requests, instead of a raw pipe that
+	// dies with the tunnel generation.
+	if port == "80" {
+		if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
+			return
+		}
+		_ = client.SetDeadline(time.Now().Add(forwardIdleTimeout))
+		br := bufio.NewReader(client)
+		for {
+			inner, err := http.ReadRequest(br)
+			if err != nil {
+				return
+			}
+			if inner.Host == "" {
+				inner.Host = req.Host
+			}
+			if !p.handleForward(client, br, inner) {
+				return
+			}
+			_ = client.SetDeadline(time.Now().Add(forwardIdleTimeout))
+		}
+	}
 	upstream, err := p.dialContext(context.Background(), "tcp", host, port)
 	if err != nil {
 		log.Printf("http connect dial %s:%s failed: %v", host, port, err)
@@ -135,6 +160,11 @@ type forwardState struct {
 	relayed    int64 // body bytes already written to the client
 	total      int64 // expected body length; -1 when unknown
 	closeAfter bool  // response is close-delimited; client conn can't be reused
+
+	// pending accumulates body bytes received before the header is sent to the
+	// client (unknown-length buffering mode): the response is reframed with an
+	// explicit Content-Length once complete, so nothing is written until then.
+	pending []byte
 
 	// cacheKey, when non-empty, marks this response as an immutable asset to
 	// capture: header/buf accumulate the exact bytes sent to the client and
@@ -247,7 +277,7 @@ func (p *MixedProxy) handleForward(client net.Conn, br *bufio.Reader, req *http.
 	zeroProgress := 0
 	for attempt := 0; attempt < forwardMaxAttempts; attempt++ {
 		gen, _ := p.tunnelGen()
-		before := st.relayed
+		before := st.relayed + int64(len(st.pending))
 		switch p.forwardOnce(client, req, body, st, host, port) {
 		case fwdDone:
 			return !st.closeAfter
@@ -263,7 +293,9 @@ func (p *MixedProxy) handleForward(client net.Conn, br *bufio.Reader, req *http.
 			}
 			// Budget by consecutive zero-progress attempts: a transfer that
 			// advances each time is healthy resumption, not a hard failure.
-			if st.relayed > before {
+			// Progress may accrue either as relayed bytes (streaming mode) or
+			// buffered pending bytes (unknown-length reframing mode).
+			if st.relayed+int64(len(st.pending)) > before {
 				zeroProgress = 0
 			} else {
 				zeroProgress++
@@ -333,8 +365,11 @@ func (p *MixedProxy) forwardOnce(client net.Conn, req *http.Request, body []byte
 		outReq.Body = http.NoBody
 	}
 	resuming := st.headerSent && st.relayed > 0
+	buffering := !st.headerSent && len(st.pending) > 0
 	if resuming {
 		outReq.Header.Set("Range", fmt.Sprintf("bytes=%d-", st.relayed))
+	} else if buffering {
+		outReq.Header.Set("Range", fmt.Sprintf("bytes=%d-", len(st.pending)))
 	}
 
 	_ = upstream.SetWriteDeadline(time.Now().Add(forwardHeaderTimeout))
@@ -353,11 +388,15 @@ func (p *MixedProxy) forwardOnce(client net.Conn, req *http.Request, body []byte
 	// Bytes of the resumed body to discard before relaying (origin ignored
 	// our Range and replied 200 with the full representation).
 	var skip int64
-	if resuming {
+	if resuming || buffering {
+		offset := st.relayed
+		if buffering {
+			offset = int64(len(st.pending))
+		}
 		switch resp.StatusCode {
 		case http.StatusPartialContent:
 			cr := resp.Header.Get("Content-Range")
-			want := fmt.Sprintf("bytes %d-", st.relayed)
+			want := fmt.Sprintf("bytes %d-", offset)
 			if !strings.HasPrefix(cr, want) {
 				return fwdAbort // offset mismatch; can't splice safely
 			}
@@ -371,19 +410,30 @@ func (p *MixedProxy) forwardOnce(client net.Conn, req *http.Request, body []byte
 				}
 			}
 		case http.StatusOK:
-			skip = st.relayed
+			skip = offset
 		default:
 			return fwdAbort
 		}
 	}
 
 	if !st.headerSent {
-		st.total = resp.ContentLength
-		if req.Method == http.MethodHead || resp.StatusCode == http.StatusNoContent ||
-			resp.StatusCode == http.StatusNotModified || resp.StatusCode < 200 {
-			st.total = 0
+		if !buffering {
+			st.total = resp.ContentLength
+			if req.Method == http.MethodHead || resp.StatusCode == http.StatusNoContent ||
+				resp.StatusCode == http.StatusNotModified || resp.StatusCode < 200 {
+				st.total = 0
+			}
 		}
-		st.closeAfter = st.total < 0
+		// Unknown-length bodies (chunked or close-delimited origins) would force
+		// close-delimited framing toward the client — but CONNECT-tunneling
+		// upstreams (Stash/Clash) hold the client conn keep-alive and don't
+		// propagate our FIN, so the client never sees EOF and a browser never
+		// finishes parsing the document. Buffer bounded unknown-length bodies and
+		// reframe with an explicit Content-Length instead.
+		if st.total < 0 || buffering {
+			return p.forwardBuffered(client, resp, upstream, st, skip)
+		}
+		st.closeAfter = false
 		hdr, err := writeForwardHeader(client, resp, st.closeAfter)
 		if err != nil {
 			return fwdAbort
@@ -391,7 +441,7 @@ func (p *MixedProxy) forwardOnce(client net.Conn, req *http.Request, body []byte
 		st.headerSent = true
 		// Capture only plain 200s of bounded size for the immutable cache.
 		if st.cacheKey != "" {
-			if resp.StatusCode == http.StatusOK && (st.total < 0 || st.total <= assetCacheMaxObject) {
+			if resp.StatusCode == http.StatusOK && st.total <= assetCacheMaxObject {
 				st.header = hdr
 			} else {
 				st.cacheKey = ""
@@ -400,6 +450,139 @@ func (p *MixedProxy) forwardOnce(client net.Conn, req *http.Request, body []byte
 	}
 
 	return p.relayForwardBody(client, resp.Body, upstream, st, skip)
+}
+
+// forwardBufferedMax bounds how much of an unknown-length body is buffered for
+// Content-Length reframing; larger bodies fall back to close-delimited
+// streaming (rare: SPA HTML and API responses are far smaller).
+const forwardBufferedMax = 8 << 20 // 8 MiB
+
+// forwardBuffered accumulates an unknown-length response body into st.pending
+// (with stall detection, resumable across attempts) and, once complete,
+// replays it to the client with explicit Content-Length framing, so the
+// client's EOF never depends on connection teardown.
+func (p *MixedProxy) forwardBuffered(client net.Conn, resp *http.Response, upstream net.Conn, st *forwardState, skip int64) int {
+	buf := proxyCopyBufferPool.Get().([]byte)
+	defer proxyCopyBufferPool.Put(buf)
+	for {
+		if st.total >= 0 && int64(len(st.pending)) >= st.total {
+			return p.finishBuffered(client, resp, st)
+		}
+		_ = upstream.SetReadDeadline(time.Now().Add(forwardStallTimeout))
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			if skip > 0 {
+				drop := skip
+				if drop > int64(n) {
+					drop = int64(n)
+				}
+				chunk = chunk[drop:]
+				skip -= drop
+			}
+			if len(chunk) > 0 {
+				if int64(len(st.pending))+int64(len(chunk)) > forwardBufferedMax {
+					return p.streamOverflowBuffered(client, resp, upstream, st, chunk)
+				}
+				st.pending = append(st.pending, chunk...)
+			}
+		}
+		if err != nil {
+			// A chunked stream cut mid-chunk surfaces as ErrUnexpectedEOF:
+			// that's a truncation even when the total length is unknown.
+			if errors.Is(err, io.ErrUnexpectedEOF) {
+				return fwdRetry
+			}
+			if errors.Is(err, io.EOF) {
+				if st.total < 0 || int64(len(st.pending)) >= st.total {
+					return p.finishBuffered(client, resp, st)
+				}
+				return fwdRetry // truncated mid-body — resume on a fresh tunnel
+			}
+			if isTimeoutErr(err) {
+				return fwdRetry // stalled — resume on a fresh tunnel
+			}
+			return fwdAbort
+		}
+	}
+}
+
+// finishBuffered writes the fully-buffered body to the client as a single
+// Content-Length-framed keep-alive response and commits the immutable cache.
+func (p *MixedProxy) finishBuffered(client net.Conn, resp *http.Response, st *forwardState) int {
+	body := st.pending
+	if st.total >= 0 && int64(len(body)) > st.total {
+		body = body[:st.total]
+	}
+	status := resp.StatusCode
+	if status == http.StatusPartialContent {
+		status = http.StatusOK // client never saw the earlier truncated response
+	}
+	h := resp.Header.Clone()
+	for _, k := range hopByHopRespHeaders {
+		h.Del(k)
+	}
+	h.Del("Content-Range")
+	h.Set("Content-Length", strconv.Itoa(len(body)))
+	h.Set("Connection", "keep-alive")
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "HTTP/1.1 %d %s\r\n", status, http.StatusText(status))
+	if err := h.Write(&sb); err != nil {
+		return fwdAbort
+	}
+	sb.WriteString("\r\n")
+	hdr := sb.String()
+
+	_ = client.SetWriteDeadline(time.Now().Add(forwardHeaderTimeout))
+	if _, err := client.Write([]byte(hdr)); err != nil {
+		return fwdAbort
+	}
+	if _, err := client.Write(body); err != nil {
+		return fwdAbort
+	}
+	_ = client.SetWriteDeadline(time.Time{})
+
+	st.headerSent = true
+	st.relayed = int64(len(body))
+	st.total = int64(len(body))
+	st.closeAfter = false
+	st.pending = nil
+	if st.cacheKey != "" && status == http.StatusOK && len(body) <= assetCacheMaxObject {
+		st.header = hdr
+		st.buf = append([]byte(nil), body...)
+		p.commitAssetCache(st)
+	} else {
+		st.cacheKey = ""
+	}
+	return fwdDone
+}
+
+// streamOverflowBuffered handles the rare unknown-length body that outgrows
+// the reframing budget: flush what we have close-delimited and stream the
+// rest raw. No cache, no resume.
+func (p *MixedProxy) streamOverflowBuffered(client net.Conn, resp *http.Response, upstream net.Conn, st *forwardState, chunk []byte) int {
+	st.closeAfter = true
+	st.cacheKey = ""
+	if _, err := writeForwardHeader(client, resp, true); err != nil {
+		return fwdAbort
+	}
+	st.headerSent = true
+	_ = client.SetWriteDeadline(time.Now().Add(forwardHeaderTimeout))
+	if _, err := client.Write(st.pending); err != nil {
+		return fwdAbort
+	}
+	if _, err := client.Write(chunk); err != nil {
+		return fwdAbort
+	}
+	_ = client.SetWriteDeadline(time.Time{})
+	st.relayed = int64(len(st.pending)) + int64(len(chunk))
+	st.pending = nil
+	st.total = -1
+	_ = upstream.SetReadDeadline(time.Time{})
+	if _, err := io.Copy(client, resp.Body); err != nil {
+		return fwdAbort
+	}
+	return fwdDone
 }
 
 // relayForwardBody streams the response body to the client, treating a
@@ -522,13 +705,36 @@ func (p *MixedProxy) forwardRaw(client net.Conn, br *bufio.Reader, req *http.Req
 
 // commitAssetCache stores a fully-relayed immutable asset for replay. Called
 // only on the complete-body paths, so a truncated transfer can never be
-// committed.
+// committed. The header is normalized to Content-Length + keep-alive framing:
+// a close-delimited original (chunked source) would make every replay depend
+// on the client seeing our FIN, which stalls behind CONNECT-tunneling
+// upstreams (Stash/Clash) that propagate closes lazily.
 func (p *MixedProxy) commitAssetCache(st *forwardState) {
 	if st.cacheKey == "" || st.header == "" {
 		return
 	}
-	p.assets.put(st.cacheKey, cachedResponse{header: st.header, body: st.buf, close: st.closeAfter})
+	header := normalizeCachedHeader(st.header, len(st.buf))
+	p.assets.put(st.cacheKey, cachedResponse{header: header, body: st.buf, close: false})
 	st.cacheKey, st.buf = "", nil
+}
+
+// normalizeCachedHeader rewrites a captured response header block to explicit
+// Content-Length framing on a kept-alive connection.
+func normalizeCachedHeader(header string, bodyLen int) string {
+	var sb strings.Builder
+	for _, line := range strings.Split(strings.TrimSuffix(header, "\r\n\r\n"), "\r\n") {
+		l := strings.ToLower(line)
+		if strings.HasPrefix(l, "connection:") || strings.HasPrefix(l, "content-length:") ||
+			strings.HasPrefix(l, "keep-alive:") || strings.HasPrefix(l, "proxy-connection:") ||
+			strings.HasPrefix(l, "transfer-encoding:") {
+			continue
+		}
+		sb.WriteString(line)
+		sb.WriteString("\r\n")
+	}
+	fmt.Fprintf(&sb, "Content-Length: %d\r\n", bodyLen)
+	sb.WriteString("Connection: keep-alive\r\n\r\n")
+	return sb.String()
 }
 
 func isTimeoutErr(err error) bool {
