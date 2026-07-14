@@ -23,10 +23,16 @@ var (
 	// progress before the proxy abandons the upstream conn and resumes on a
 	// fresh tunnel — the signature of the gateway revoking the session
 	// mid-transfer. Short: on a live tunnel LAN assets always progress.
-	forwardStallTimeout = 6 * time.Second
+	forwardStallTimeout = 4 * time.Second
 	// forwardHeaderTimeout bounds request-write + response-header wait; longer
 	// than the body stall window because it includes origin processing time.
 	forwardHeaderTimeout = 15 * time.Second
+	// forwardHeaderTimeoutRetryable is the tighter first-byte bound for
+	// idempotent (resumable) requests: LAN origins answer in well under a
+	// second, so waiting the full budget on a dead-window tunnel only inflates
+	// tail latency — fail fast, kick the refresher, retry on the next tunnel.
+	// Non-idempotent requests keep the generous budget since they get no retry.
+	forwardHeaderTimeoutRetryable = 8 * time.Second
 	// forwardIdleTimeout bounds how long a kept-alive client conn may sit idle
 	// between requests before the proxy closes it.
 	forwardIdleTimeout = 2 * time.Minute
@@ -278,7 +284,7 @@ func (p *MixedProxy) handleForward(client net.Conn, br *bufio.Reader, req *http.
 	for attempt := 0; attempt < forwardMaxAttempts; attempt++ {
 		gen, _ := p.tunnelGen()
 		before := st.relayed + int64(len(st.pending))
-		switch p.forwardOnce(client, req, body, st, host, port) {
+		switch p.forwardOnce(client, req, body, st, host, port, canRetry) {
 		case fwdDone:
 			return !st.closeAfter
 		case fwdAbort:
@@ -310,8 +316,9 @@ func (p *MixedProxy) handleForward(client net.Conn, br *bufio.Reader, req *http.
 			log.Printf("http forward %s%s stalled (relayed %d/%d), waiting for fresh tunnel",
 				host, req.URL.Path, st.relayed, st.total)
 			// The tunnel generation this attempt used already proved dead —
-			// wait for the refresher to swap in a new one instead of burning
-			// the retry budget on the same generation.
+			// kick the refresher to rotate now (instead of waiting out the
+			// periodic timer) and block until the fresh tunnel is in place.
+			p.kickRefresh()
 			p.waitTunnelSwap(gen, forwardSwapWait)
 		}
 	}
@@ -338,8 +345,9 @@ func (p *MixedProxy) savePartial(st *forwardState) {
 
 // forwardOnce performs one attempt: dial a fresh upstream through the current
 // tunnel, send the request (with a Range header when resuming a partially
-// relayed body), and relay the response with stall detection.
-func (p *MixedProxy) forwardOnce(client net.Conn, req *http.Request, body []byte, st *forwardState, host, port string) int {
+// relayed body), and relay the response with stall detection. canRetry selects
+// the tighter first-byte timeout for requests that will be retried on failure.
+func (p *MixedProxy) forwardOnce(client net.Conn, req *http.Request, body []byte, st *forwardState, host, port string, canRetry bool) int {
 	upstream, err := p.dialContext(context.Background(), "tcp", hostnameOnly(host), port)
 	if err != nil {
 		log.Printf("http forward dial %s:%s failed: %v", hostnameOnly(host), port, err)
@@ -372,13 +380,17 @@ func (p *MixedProxy) forwardOnce(client net.Conn, req *http.Request, body []byte
 		outReq.Header.Set("Range", fmt.Sprintf("bytes=%d-", len(st.pending)))
 	}
 
-	_ = upstream.SetWriteDeadline(time.Now().Add(forwardHeaderTimeout))
+	headerBudget := forwardHeaderTimeout
+	if canRetry {
+		headerBudget = forwardHeaderTimeoutRetryable
+	}
+	_ = upstream.SetWriteDeadline(time.Now().Add(headerBudget))
 	if err := outReq.Write(upstream); err != nil {
 		return fwdRetry
 	}
 	_ = upstream.SetWriteDeadline(time.Time{})
 
-	_ = upstream.SetReadDeadline(time.Now().Add(forwardHeaderTimeout))
+	_ = upstream.SetReadDeadline(time.Now().Add(headerBudget))
 	resp, err := http.ReadResponse(bufio.NewReader(upstream), outReq)
 	if err != nil {
 		return fwdRetry

@@ -93,6 +93,12 @@ type MixedProxy struct {
 	tunGen     uint64
 	tunSwapped chan struct{}
 
+	// refreshKick is a capacity-1 signal to the tunnel refresher: a proxied
+	// request just proved the current tunnel dead (stall/dial timeout), so
+	// rotate now instead of waiting out the periodic timer. Nil when no
+	// refresher is subscribed.
+	refreshKick chan struct{}
+
 	auth *ProxyAuth
 
 	dnsMu    sync.Mutex
@@ -167,6 +173,34 @@ func (p *MixedProxy) tunnelGen() (uint64, <-chan struct{}) {
 	p.tunMu.RLock()
 	defer p.tunMu.RUnlock()
 	return p.tunGen, p.tunSwapped
+}
+
+// RefreshKick returns a capacity-1 channel that receives a signal whenever a
+// proxied request proves the current tunnel dead (mid-body stall or dial
+// timeout). The tunnel refresher selects on it to rotate immediately instead
+// of letting the request wait out the rest of the periodic rotation timer.
+func (p *MixedProxy) RefreshKick() <-chan struct{} {
+	p.tunMu.Lock()
+	defer p.tunMu.Unlock()
+	if p.refreshKick == nil {
+		p.refreshKick = make(chan struct{}, 1)
+	}
+	return p.refreshKick
+}
+
+// kickRefresh signals the refresher (non-blocking) that the current tunnel
+// generation has been proven dead by real traffic.
+func (p *MixedProxy) kickRefresh() {
+	p.tunMu.RLock()
+	ch := p.refreshKick
+	p.tunMu.RUnlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default: // a kick is already pending
+	}
 }
 
 // waitTunnelSwap blocks until the tunnel generation advances past gen, or
@@ -362,6 +396,10 @@ func (p *MixedProxy) dialContext(ctx context.Context, network, host, port string
 		if !isRetryableDialError(err) {
 			return nil, err
 		}
+		// A timed-out attempt is the signature of a dead-window tunnel: tell
+		// the refresher to rotate now rather than letting this request burn
+		// its whole budget waiting for the periodic timer.
+		p.kickRefresh()
 		lastErr = err
 		select {
 		case <-ctx.Done():

@@ -370,14 +370,32 @@ const tunnelRefreshAfter = 18 * time.Second
 // runRefresher proactively rotates the tunnel before the gateway's integrity
 // cutoff. It builds a new tunnel out-of-band, atomically swaps the live proxy
 // onto it, then retires the old device after a short drain so in-flight
-// connections on it can finish.
+// connections on it can finish. Besides the periodic timer it also reacts to
+// kicks from the proxy: a stalled/timed-out request is live proof the current
+// tunnel is dead, and rotating immediately shaves the remaining timer wait off
+// that request's tail latency.
 func (m *Manager) runRefresher(ctx context.Context) {
+	m.mu.Lock()
+	proxy := m.proxy
+	m.mu.Unlock()
+	var kick <-chan struct{}
+	if proxy != nil {
+		kick = proxy.RefreshKick()
+	}
+
 	ticker := time.NewTicker(tunnelRefreshAfter)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-kick:
+			if err := m.refreshTunnelKicked(ctx, true); err != nil {
+				log.Printf("kicked tunnel refresh failed: %v", err)
+			} else {
+				// A successful rotation restarts the proactive cadence.
+				ticker.Reset(tunnelRefreshAfter)
+			}
 		case <-ticker.C:
 			if err := m.refreshTunnel(ctx); err != nil {
 				// Non-fatal: the handshake watchdog remains the backstop if a
@@ -393,6 +411,12 @@ func (m *Manager) runRefresher(ctx context.Context) {
 // after a short drain window. Calls are serialized and rate-limited so the timer
 // and stall-detector paths don't build tunnels concurrently or thrash.
 func (m *Manager) refreshTunnel(ctx context.Context) error {
+	return m.refreshTunnelKicked(ctx, false)
+}
+
+// refreshTunnelKicked is refreshTunnel with the kicked flag: kicked refreshes
+// (a proxied request proved the tunnel dead) use a lower coalescing floor.
+func (m *Manager) refreshTunnelKicked(ctx context.Context, kicked bool) error {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 
@@ -408,8 +432,15 @@ func (m *Manager) refreshTunnel(ctx context.Context) error {
 	m.mu.Unlock()
 
 	// Coalesce refreshes that land right on top of each other (e.g. stall detector
-	// firing just after the periodic timer).
-	if sinceLast < minRefreshInterval {
+	// firing just after the periodic timer). Kicked refreshes carry live proof the
+	// current tunnel is dead (a request stalled on it), so they get a lower floor:
+	// suppressing them entirely would leave the stalled request waiting out the
+	// rest of the periodic cycle on a proven-dead tunnel.
+	floor := minRefreshInterval
+	if kicked {
+		floor = minKickRefreshInterval
+	}
+	if sinceLast < floor {
 		return nil
 	}
 
@@ -487,6 +518,12 @@ func waitDrained(dev connCounter, min, max, step time.Duration) {
 // minRefreshInterval coalesces refreshes triggered close together (periodic
 // timer + stall detector) so we don't build tunnels back-to-back.
 const minRefreshInterval = 8 * time.Second
+
+// minKickRefreshInterval is the coalescing floor for proxy-kicked refreshes.
+// A kick means a request is actively stalled on a proven-dead tunnel, so it
+// only needs to guard against pathological thrash (kick landing right on the
+// heels of a completed swap), not enforce the full periodic spacing.
+const minKickRefreshInterval = 2 * time.Second
 
 // runHandshakeWatch reconnects the tunnel when it detects the data path is dead.
 // It uses two complementary signals, because CorpLink gateways can keep the
