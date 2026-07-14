@@ -1,11 +1,11 @@
 {
     "schema_version": 1,
-    "commit": "54acb055386e9187c48e67e2f941a72c163711e1",
-    "indexed_at": "2026-07-10T02:57:40Z",
+    "commit": "bab5e4a10a91921f9429a52647f6bc7149453ac2",
+    "indexed_at": "2026-07-14T03:40:51Z",
     "project": "Users-tao-workspace-fu-corplink",
-    "nodes": 2150,
-    "edges": 7870,
-    "original_size": 10354688,
-    "compressed_size": 2122458,
+    "nodes": 2161,
+    "edges": 7864,
+    "original_size": 10420224,
+    "compressed_size": 2143156,
     "compression_level": 3
 }
