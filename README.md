@@ -276,7 +276,7 @@ curl --proxy http://127.0.0.1:8989 http://example.com
 | `socks_listen` | `0.0.0.0:8989` | 混合代理监听地址 |
 | `vpn_server_id` | `0` | 固定节点 ID；`0` = 不固定 |
 | `vpn_select_strategy` | `default` | `default` 首个探测可达节点；`latency` 最低延迟节点 |
-| `route_mode` | `full` | `full` 用服务端全局路由；`split` 用服务端分流路由 |
+| `route_mode` | `full` | `full` 用服务端全局路由；`split` 用服务端分流路由。**访问不在服务端分流表里的内网服务（表现为大资源加载失败、日志报 `no route to host`、根页面偶发 200 是命中内存缓存）请用 `full`。** |
 | `force_protocol` | 空 | 空 = 按节点 `protocol_mode` 自动；也可 `udp` / `tcp` |
 | `upstream_proxy` | 空 | 把 fu-corplink 全部出站走上游 HTTP/SOCKS5 代理，与系统级 TUN VPN 共存（见下） |
 | `proxy_auth_enabled` | `false` | 是否要求代理鉴权 |
@@ -411,6 +411,7 @@ curl --proxy http://127.0.0.1:8989 http://<某内网服务>/ -m 10 -o /dev/null 
 - `upstream_proxy` 走 HTTP 代理时只支持 TCP 传输（WireGuard 协议需设为 `tcp`）；UDP 传输不被代理。
 - Windows 未做端到端验证。
 - `full` / `split` 都依赖飞连服务端返回的路由；若服务端没返回全局路由，程序会拒绝盲目回退到 `0.0.0.0/0`，避免 peer IP 路由环。
+- **`route_mode=split` 下内网页面整站加载失败**：服务端分流路由表通常只覆盖 DNS、少数网段，访问表外内网服务（真实 IP 落在 `172.16/12`、`10/8` 等）时 netstack 拨号报 `connect tcp <内网IP>:80: no route to host`，页面表现为根 HTML 偶尔返回 200（命中内存缓存）、其余资源 0 字节卡死。改用 `route_mode=full` 即可（已通过完整资源加载验证）。TCP 传输被网关周期性切断的现象（日志 `transport conn ... closed: EOF`）本身不是页面加载失败的原因——自愈续传机制能扛住它，前提是路由先通。
 
 ---
 
